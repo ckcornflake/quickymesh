@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "Trellis 2 multi-view texturing workflow.",
+    "Takes an existing retopologized GLB + concept art image.",
+    "Outputs a fully textured GLB with Trellis PBR texture at up to 4096px.",
+    "LoadMesh accepts a full absolute path to the GLB file via glb_path."
+  ],
+
+  "1": {
+    "class_type": "Trellis2LoadModel",
+    "inputs": {
+      "modelname": "microsoft/TRELLIS.2-4B",
+      "backend": "flash_attn",
+      "device": "cuda",
+      "offload_models": false,
+      "keep_models_loaded": false,
+      "low_vram": false
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "concept_chosen.png"
+    }
+  },
+  "3": {
+    "class_type": "Trellis2PreProcessImage",
+    "inputs": {
+      "image": ["2", 0],
+      "padding": 0,
+      "remove_background": true
+    }
+  },
+  "4": {
+    "class_type": "Trellis2LoadMesh",
+    "inputs": {
+      "glb_path": ""
+    }
+  },
+  "5": {
+    "class_type": "Trellis2MeshTexturingMultiView",
+    "inputs": {
+      "pipeline": ["1", 0],
+      "front_image": ["3", 0],
+      "trimesh": ["4", 0],
+      "seed": 0,
+      "texture_steps": 12,
+      "texture_guidance_strength": 3.0,
+      "texture_guidance_rescale": 0.2,
+      "texture_rescale_t": 3.0,
+      "resolution": 1024,
+      "texture_size": 4096,
+      "texture_alpha_mode": "OPAQUE",
+      "double_side_material": false,
+      "texture_guidance_interval_start": 0.0,
+      "texture_guidance_interval_end": 0.9,
+      "bake_on_vertices": false,
+      "use_custom_normals": false,
+      "mesh_cluster_threshold_cone_half_angle_rad": 60.0,
+      "front_axis": "z",
+      "blend_temperature": 1.0,
+      "sampler": "euler"
+    }
+  },
+  "6": {
+    "class_type": "Trellis2ExportMesh",
+    "inputs": {
+      "trimesh": ["5", 0],
+      "filename_prefix": "3D/textured_output",
+      "file_format": "glb"
+    }
+  }
+}

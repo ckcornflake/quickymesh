@@ -1,0 +1,21 @@
+# Core
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+
+# Gemini image generation
+google-genai>=1.10.0
+
+# Image processing
+Pillow>=10.0.0
+
+# HTTP (ComfyUI client)
+requests>=2.31.0
+
+# 3D / mesh
+trimesh>=4.4.0
+numpy>=1.24.0
+
+# Testing
+pytest>=8.0.0
+pytest-mock>=3.14.0

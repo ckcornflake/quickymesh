@@ -1,0 +1,117 @@
+{
+  "_comment": [
+    "Trellis 2 mesh generation workflow — matched to verified working UI workflow.",
+    "Chain: LoadModel -> LoadImageWithTransparency -> PreProcessImage",
+    "       -> MeshWithVoxelAdvancedGenerator",
+    "       -> Remesh -> SimplifyMesh (to --polycount target)",
+    "       -> FillHolesWithMeshlib -> MeshWithVoxelToTrimesh",
+    "       -> SmoothNormals -> ExportMesh",
+    "Phase 4 only symmetrizes and smooths — no poly reduction needed.",
+    "generate_texture_slat is false — geometry only; we texture separately."
+  ],
+
+  "1": {
+    "class_type": "Trellis2LoadModel",
+    "inputs": {
+      "modelname": "microsoft/TRELLIS.2-4B",
+      "backend": "flash_attn",
+      "device": "cuda",
+      "low_vram": false,
+      "keep_models_loaded": false
+    }
+  },
+  "2": {
+    "class_type": "Trellis2LoadImageWithTransparency",
+    "inputs": {
+      "image": "concept_chosen.png",
+      "upload": "image"
+    }
+  },
+  "3": {
+    "class_type": "Trellis2PreProcessImage",
+    "inputs": {
+      "image": ["2", 2],
+      "padding": 25,
+      "remove_background": true
+    }
+  },
+  "4": {
+    "class_type": "Trellis2MeshWithVoxelAdvancedGenerator",
+    "inputs": {
+      "pipeline": ["1", 0],
+      "image": ["3", 0],
+      "seed": 0,
+      "pipeline_type": "512",
+      "sparse_structure_steps": 12,
+      "sparse_structure_guidance_strength": 6.5,
+      "sparse_structure_guidance_rescale": 0.2,
+      "sparse_structure_rescale_t": 4.0,
+      "shape_steps": 12,
+      "shape_guidance_strength": 6.5,
+      "shape_guidance_rescale": 0.20,
+      "shape_rescale_t": 4.0,
+      "texture_steps": 12,
+      "texture_guidance_strength": 3.0,
+      "texture_guidance_rescale": 0.20,
+      "texture_rescale_t": 3.0,
+      "max_num_tokens": 999999,
+      "max_views": 4,
+      "sparse_structure_resolution": 32,
+      "generate_texture_slat": false,
+      "sparse_structure_guidance_interval_start": 0.1,
+      "sparse_structure_guidance_interval_end": 1.0,
+      "shape_guidance_interval_start": 0.1,
+      "shape_guidance_interval_end": 1.0,
+      "texture_guidance_interval_start": 0.0,
+      "texture_guidance_interval_end": 0.9,
+      "use_tiled_decoder": true,
+      "sampler": "euler"
+    }
+  },
+  "5": {
+    "class_type": "Trellis2Remesh",
+    "inputs": {
+      "mesh": ["4", 0],
+      "remesh_band": 1.0,
+      "remesh_project": 0.5,
+      "dual_contouring_resolution": "Auto",
+      "remove_floaters": true,
+      "remove_inner_faces": true
+    }
+  },
+  "6": {
+    "class_type": "Trellis2SimplifyMesh",
+    "inputs": {
+      "mesh": ["5", 0],
+      "target_face_num": 8000,
+      "method": "Cumesh"
+    }
+  },
+  "7": {
+    "class_type": "Trellis2FillHolesWithMeshlib",
+    "inputs": {
+      "mesh": ["6", 0]
+    }
+  },
+  "8": {
+    "class_type": "Trellis2MeshWithVoxelToTrimesh",
+    "inputs": {
+      "mesh": ["7", 0],
+      "reorient_vertices": "90 degrees"
+    }
+  },
+  "9": {
+    "class_type": "Trellis2SmoothNormals",
+    "inputs": {
+      "trimesh": ["8", 0]
+    }
+  },
+  "10": {
+    "class_type": "Trellis2ExportMesh",
+    "inputs": {
+      "trimesh": ["9", 0],
+      "filename_prefix": "3D/mesh_output",
+      "file_format": "glb"
+    }
+  }
+}

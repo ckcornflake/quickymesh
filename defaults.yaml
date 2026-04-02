@@ -1,0 +1,33 @@
+gemini:
+  # Primary image generation model
+  model: "gemini-2.5-flash-image"
+  # Alternative model (override in .env as GEMINI_MODEL)
+  alternative_model: "gemini-3.1-flash-image-preview"
+
+generation:
+  # How many concept art images to generate per pipeline
+  num_concept_arts: 4
+  # Default polygon target for Trellis mesh generation
+  num_polys: 8000
+  # Thumbnail size (px) for review sheet cells
+  review_sheet_thumb_size: 256
+  # Size (px) of the 3D HTML preview viewport
+  html_preview_size: 512
+  # Default mesh export format
+  export_format: "glb"
+  # White background suffix appended to every image generation prompt
+  background_suffix: "plain white background"
+
+infrastructure:
+  comfyui_url: "http://localhost:8188"
+  comfyui_install_dir: "C:/Users/jmkel/Downloads/ComfyUI_windows_portable_nvidia_cu128/ComfyUI_windows_portable"
+  # The output/ directory where ComfyUI writes results.
+  # For the portable build this is inside the inner ComfyUI/ subfolder.
+  comfyui_output_dir: "C:/Users/jmkel/Downloads/ComfyUI_windows_portable_nvidia_cu128/ComfyUI_windows_portable/ComfyUI/output"
+  comfyui_poll_interval: 2.0
+  comfyui_timeout: 600.0
+  blender_path: "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+
+output:
+  # Root directory for all pipeline output (relative to repo root or absolute)
+  root: "pipeline_root"

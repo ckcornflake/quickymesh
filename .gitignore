@@ -134,6 +134,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Pipeline output (local only)
+pipeline_root/
+
 # Environments
 .env
 .envrc
