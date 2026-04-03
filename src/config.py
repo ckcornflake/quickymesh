@@ -95,6 +95,16 @@ class Config:
     def background_suffix(self) -> str:
         return self._data["generation"]["background_suffix"]
 
+    @property
+    def concept_art_image_size(self) -> int:
+        """Side length (px) for FLUX-generated concept art images."""
+        return int(
+            os.getenv(
+                "CONCEPT_ART_IMAGE_SIZE",
+                self._data["generation"].get("concept_art_image_size", 1024),
+            )
+        )
+
     # ------------------------------------------------------------------
     # Infrastructure
     # ------------------------------------------------------------------
@@ -183,6 +193,14 @@ class Config:
     @property
     def workflow_texture(self) -> Path:
         return _REPO_ROOT / "comfyui_workflows" / "trellis_texture.json"
+
+    @property
+    def workflow_flux_generate(self) -> Path:
+        return _REPO_ROOT / "comfyui_workflows" / "flux_dev_fp8.json"
+
+    @property
+    def workflow_controlnet_restyle(self) -> Path:
+        return _REPO_ROOT / "comfyui_workflows" / "controlnet_restyle.json"
 
 
 # Module-level singleton — import this in application code

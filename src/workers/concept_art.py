@@ -8,11 +8,14 @@ MockConceptArtWorker   — deterministic stub for tests (returns solid-colour PN
 
 from __future__ import annotations
 
+import copy
 import io
 import logging
+import random
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -37,6 +40,9 @@ class ConceptArtWorker(ABC):
     naming decisions live in the orchestration layer (concept_art_pipeline.py).
     """
 
+    #: Set to False on workers that cannot edit existing images (e.g. FLUX).
+    supports_modify: bool = True
+
     @abstractmethod
     def generate_image(self, prompt: str) -> bytes:
         """
@@ -60,17 +66,37 @@ class ConceptArtWorker(ABC):
 
 
 class GeminiConceptArtWorker(ConceptArtWorker):
-    """Uses the google-genai SDK to generate and modify images."""
+    """
+    Uses the google-genai SDK to generate and modify images.
 
-    def __init__(self, api_key: str, model: str):
-        from google import genai
-        from google.genai import types as _types
+    The genai.Client is created lazily on first use so that startup doesn't
+    fail when no API key is configured (e.g. user intends to use FLUX only).
+    If `api_key` is None or empty, the worker reads GEMINI_API_KEY from the
+    environment at call time — allowing the CLI to set it interactively.
+    """
 
-        self._client = genai.Client(api_key=api_key)
+    def __init__(self, api_key: str | None, model: str):
+        self._api_key = api_key or None   # None → read from env at call time
         self._model = model
-        self._types = _types
+        self._client: Any = None
+        self._types: Any = None
+
+    def _ensure_client(self) -> None:
+        if self._client is None:
+            import os
+            key = self._api_key or os.environ.get("GEMINI_API_KEY", "")
+            if not key:
+                raise EnvironmentError(
+                    "GEMINI_API_KEY is not set. Add it to .env, export it, "
+                    "or enter it when prompted."
+                )
+            from google import genai
+            from google.genai import types as _types
+            self._client = genai.Client(api_key=key)
+            self._types = _types
 
     def generate_image(self, prompt: str) -> bytes:
+        self._ensure_client()
         def _call():
             return self._client.models.generate_content(
                 model=self._model,
@@ -83,6 +109,7 @@ class GeminiConceptArtWorker(ConceptArtWorker):
         return self._extract_image_bytes(response)
 
     def modify_image(self, image_bytes: bytes, instruction: str) -> bytes:
+        self._ensure_client()
         contents = [
             self._types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
             self._types.Part.from_text(text=instruction),
@@ -138,6 +165,229 @@ class GeminiConceptArtWorker(ConceptArtWorker):
             f"Diagnostic: {diag}\n"
             "Check that the model supports image generation and the prompt is not blocked."
         )
+
+
+# ---------------------------------------------------------------------------
+# FLUX.1 [dev] implementation via ComfyUI
+# ---------------------------------------------------------------------------
+
+
+class FluxComfyUIConceptArtWorker(ConceptArtWorker):
+    """
+    Generates concept art using FLUX.1 [dev] FP8 running in ComfyUI.
+
+    Requires the flux1-dev-fp8.safetensors checkpoint to be installed in
+    ComfyUI's models/checkpoints directory and ComfyUI to be running.
+
+    Image modification is not supported — modify_image() raises NotImplementedError.
+
+    Pass `arbiter` (a VRAMArbiter) to serialize this worker with Trellis/Blender
+    and prevent VRAM exhaustion when multiple local-GPU workflows run concurrently.
+    """
+
+    supports_modify: bool = False
+
+    def __init__(
+        self,
+        client: "Any",          # ComfyUIClient
+        comfyui_output_dir: Path,
+        workflow_path: Path,
+        image_size: int = 1024,
+        arbiter: "Any | None" = None,   # VRAMArbiter
+        vram_lock_timeout: float = 1800.0,
+    ):
+        import json
+        self._client = client
+        self._output_dir = Path(comfyui_output_dir)
+        self._base_workflow: dict = json.loads(Path(workflow_path).read_text(encoding="utf-8"))
+        self._image_size = image_size
+        self._arbiter = arbiter
+        self._vram_lock_timeout = vram_lock_timeout
+
+    def generate_image(self, prompt: str) -> bytes:
+        from contextlib import nullcontext
+        job_id = f"qm_flux_{random.randint(0, 0xFFFFFFFF):08x}"
+        seed = random.randint(0, 0xFFFFFFFF)
+        workflow = _inject_flux_params(
+            self._base_workflow,
+            prompt=prompt,
+            job_id=job_id,
+            image_size=self._image_size,
+            seed=seed,
+        )
+        ctx = (
+            self._arbiter.acquire(timeout=self._vram_lock_timeout)
+            if self._arbiter else nullcontext()
+        )
+        with ctx:
+            history = self._client.run_workflow_and_get_history(workflow)
+            self._client.free_memory()
+        return _extract_comfyui_image(history, self._client)
+
+    def modify_image(self, image_bytes: bytes, instruction: str) -> bytes:
+        raise NotImplementedError(
+            "FLUX.1 [dev] does not support image modification. "
+            "Use 'regenerate' to create a new image from scratch."
+        )
+
+
+class ControlNetRestyleWorker:
+    """
+    Restyles an existing concept art image using ControlNet Canny + SDXL.
+
+    Preserves the silhouette of the input image while applying a new visual
+    style described by a positive/negative prompt pair and a denoise strength.
+
+    This worker is NOT a ConceptArtWorker subclass — it is passed separately
+    as `restyle_worker` and used only during the interactive concept-art review.
+    It is never used for generation or text-based modification.
+
+    Pass `arbiter` (a VRAMArbiter) to serialize this with Trellis/Blender/FLUX
+    and prevent VRAM exhaustion when multiple local-GPU workflows run concurrently.
+    """
+
+    def __init__(
+        self,
+        client: "Any",          # ComfyUIClient
+        workflow_path: Path,
+        arbiter: "Any | None" = None,   # VRAMArbiter
+        vram_lock_timeout: float = 1800.0,
+    ):
+        import json
+        self._client = client
+        self._base_workflow: dict = json.loads(Path(workflow_path).read_text(encoding="utf-8"))
+        self._arbiter = arbiter
+        self._vram_lock_timeout = vram_lock_timeout
+
+    def restyle_image(
+        self,
+        image_bytes: bytes,
+        positive: str,
+        negative: str,
+        denoise: float,
+    ) -> bytes:
+        """
+        Restyle `image_bytes` using ControlNet Canny.
+
+        Parameters
+        ----------
+        image_bytes:  Raw PNG/JPEG bytes of the source image.
+        positive:     Comma-separated style keywords (e.g. "zerg, biomechanical, dark chitin").
+        negative:     Comma-separated unwanted elements (e.g. "weapons, people, blurry").
+        denoise:      0.1 (very faithful to original shape) → 1.0 (maximum creativity).
+        """
+        import io as _io
+        import tempfile
+        from contextlib import nullcontext
+
+        # Upload source image to ComfyUI input directory
+        img = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            tmp_path = Path(tf.name)
+            img.save(tmp_path, format="PNG")
+        try:
+            server_image = self._client.upload_image(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        job_id = f"qm_restyle_{random.randint(0, 0xFFFFFFFF):08x}"
+        seed = random.randint(0, 0xFFFFFFFF)
+        workflow = _inject_restyle_params(
+            self._base_workflow,
+            image_name=server_image,
+            positive=positive,
+            negative=negative,
+            denoise=denoise,
+            job_id=job_id,
+            seed=seed,
+        )
+
+        ctx = (
+            self._arbiter.acquire(timeout=self._vram_lock_timeout)
+            if self._arbiter else nullcontext()
+        )
+        with ctx:
+            history = self._client.run_workflow_and_get_history(workflow)
+            self._client.free_memory()
+
+        return _extract_comfyui_image(history, self._client)
+
+
+def _inject_restyle_params(
+    base_workflow: dict,
+    *,
+    image_name: str,
+    positive: str,
+    negative: str,
+    denoise: float,
+    job_id: str,
+    seed: int,
+) -> dict:
+    """Deep-copy the ControlNet restyle workflow and inject runtime values."""
+    wf = copy.deepcopy(base_workflow)
+    for node in wf.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        inp = node.get("inputs", {})
+        if ct == "LoadImage":
+            inp["image"] = image_name
+        elif ct == "CLIPTextEncode" and inp.get("text") == "__POSITIVE__":
+            inp["text"] = positive
+        elif ct == "CLIPTextEncode" and inp.get("text") == "__NEGATIVE__":
+            inp["text"] = negative
+        elif ct == "KSampler":
+            inp["seed"] = seed
+            inp["denoise"] = denoise
+            inp["control_after_generate"] = "fixed"
+        elif ct == "SaveImage":
+            inp["filename_prefix"] = job_id
+    return wf
+
+
+def _inject_flux_params(
+    base_workflow: dict,
+    *,
+    prompt: str,
+    job_id: str,
+    image_size: int,
+    seed: int,
+) -> dict:
+    """Deep-copy the workflow and inject runtime values."""
+    wf = copy.deepcopy(base_workflow)
+    for node in wf.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        inp = node.get("inputs", {})
+        if ct == "CLIPTextEncode" and inp.get("text") == "__PROMPT__":
+            inp["text"] = prompt
+        elif ct == "EmptySD3LatentImage":
+            inp["width"] = image_size
+            inp["height"] = image_size
+        elif ct == "KSampler":
+            inp["seed"] = seed
+            inp["control_after_generate"] = "fixed"
+        elif ct == "SaveImage":
+            inp["filename_prefix"] = job_id
+    return wf
+
+
+def _extract_comfyui_image(history: dict, client: "Any") -> bytes:
+    """Pull the first image from a completed FLUX workflow history entry."""
+    for node_output in history.get("outputs", {}).values():
+        images = node_output.get("images", [])
+        if images:
+            img = images[0]
+            return client.get_image(
+                img["filename"],
+                img.get("subfolder", ""),
+                img.get("type", "output"),
+            )
+    raise RuntimeError(
+        "FLUX workflow completed but produced no images. "
+        "Check that the workflow ran correctly in ComfyUI."
+    )
 
 
 # ---------------------------------------------------------------------------

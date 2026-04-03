@@ -5,7 +5,7 @@ Usage:
     python main.py
 
 Environment variables (override defaults.yaml):
-    GEMINI_API_KEY      Required.
+    GEMINI_API_KEY      Required when using Gemini Flash for concept art.
     GEMINI_MODEL        Which Gemini model to use.
     OUTPUT_ROOT         Where to write pipeline data.
     COMFYUI_URL         ComfyUI server URL.
@@ -15,13 +15,11 @@ Environment variables (override defaults.yaml):
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    stream=sys.stderr,
-)
+from src.logging_config import configure_logging
+configure_logging()
 
 from src.broker import Broker
 from src.config import config
@@ -30,7 +28,11 @@ from src.agent.cli_main import run_cli
 from src.prompt_interface.cli import CLIPromptInterface
 from src.vram_arbiter import VRAMArbiter
 from src.workers.comfyui_client import ComfyUIClient
-from src.workers.concept_art import GeminiConceptArtWorker
+from src.workers.concept_art import (
+    ControlNetRestyleWorker,
+    FluxComfyUIConceptArtWorker,
+    GeminiConceptArtWorker,
+)
 from src.workers.screenshot import BlenderScreenshotWorker
 from src.workers.trellis import ComfyUITrellisWorker
 
@@ -46,10 +48,32 @@ def main() -> None:
         poll_interval=config.comfyui_poll_interval,
         timeout=config.comfyui_timeout,
     )
+
+    # Gemini worker — created lazily: no API key required at startup.
+    # If the user selects Gemini for a pipeline and no key is set, the CLI
+    # will prompt for it and store it in os.environ before generation begins.
     concept_worker = GeminiConceptArtWorker(
-        api_key=config.gemini_api_key,
+        api_key=os.environ.get("GEMINI_API_KEY"),
         model=config.gemini_model,
     )
+
+    # FLUX.1 [dev] worker — requires ComfyUI + flux1-dev-fp8.safetensors.
+    flux_concept_worker = FluxComfyUIConceptArtWorker(
+        client=comfyui,
+        comfyui_output_dir=config.comfyui_output_dir,
+        workflow_path=config.workflow_flux_generate,
+        image_size=config.concept_art_image_size,
+        arbiter=arbiter,
+        vram_lock_timeout=config.vram_lock_timeout,
+    )
+
+    restyle_worker = ControlNetRestyleWorker(
+        client=comfyui,
+        workflow_path=config.workflow_controlnet_restyle,
+        arbiter=arbiter,
+        vram_lock_timeout=config.vram_lock_timeout,
+    )
+
     trellis_worker = ComfyUITrellisWorker(
         client=comfyui,
         comfyui_output_dir=config.comfyui_output_dir,
@@ -65,6 +89,7 @@ def main() -> None:
         arbiter=arbiter,
         cfg=config,
         concept_worker=concept_worker,
+        flux_concept_worker=flux_concept_worker,
         trellis_worker=trellis_worker,
         screenshot_worker=screenshot_worker,
     )
@@ -77,6 +102,7 @@ def main() -> None:
             concept_worker=concept_worker,
             trellis_worker=trellis_worker,
             screenshot_worker=screenshot_worker,
+            restyle_worker=restyle_worker,
         )
     finally:
         broker.close()

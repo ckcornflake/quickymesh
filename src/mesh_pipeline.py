@@ -25,7 +25,6 @@ from src.state import (
     MeshStatus,
     PipelineState,
     PipelineStatus,
-    SymmetryAxis,
 )
 from src.workers.trellis import TrellisWorker
 
@@ -238,17 +237,6 @@ def run_mesh_review(
                 mesh_item.final_name = asset_name
                 mesh_item.export_format = export_fmt
                 mesh_item.status = MeshStatus.APPROVED
-
-                # Confirm symmetry axis if symmetrize is on
-                if state.symmetrize:
-                    axis_options = [a.value for a in SymmetryAxis]
-                    axis_raw = ui.ask(
-                        f"Symmetry axis (current: {state.symmetry_axis.value}). "
-                        f"Options: {', '.join(axis_options)}. Press Enter to keep:",
-                    ).strip()
-                    if axis_raw in axis_options:
-                        state.symmetry_axis = SymmetryAxis(axis_raw)
-
                 state.save(state_path)
                 ui.inform(f"Approved '{asset_name}' ({export_fmt}). Will be exported after all reviews.")
                 break
@@ -265,6 +253,19 @@ def run_mesh_review(
                     return "quit"
                 if poly_raw.isdigit() and int(poly_raw) > 0:
                     state.num_polys = int(poly_raw)
+                # Offer symmetrize update
+                from src.state import SymmetryAxis
+                _sym_options = [a.value for a in SymmetryAxis]
+                sym_display = f"{'on' if state.symmetrize else 'off'}, axis={state.symmetry_axis.value}"
+                sym_raw = ui.ask(
+                    f"Current symmetry: {sym_display}. "
+                    f"Enter an axis ({', '.join(_sym_options)}) to enable, 'off' to disable, or Enter to keep:"
+                ).strip().lower()
+                if sym_raw in _sym_options:
+                    state.symmetrize = True
+                    state.symmetry_axis = SymmetryAxis(sym_raw)
+                elif sym_raw == "off":
+                    state.symmetrize = False
                 mesh_item.status = MeshStatus.QUEUED  # could be re-queued later
                 state.save(state_path)
                 ui.inform(f"Mesh '{mesh_item.sub_name}' rejected.")

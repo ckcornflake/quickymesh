@@ -295,17 +295,35 @@ class TestRunMeshReview:
 
     def test_reject_sets_mesh_back_to_queued(self, state_with_approved_arts, pipeline_dir, cfg):
         state = self._setup(state_with_approved_arts, pipeline_dir, cfg)
-        ui = MockPromptInterface(["reject", "", "reject", ""])
+        # reject: poly(blank), symmetry(blank); repeat for second mesh
+        ui = MockPromptInterface(["reject", "", "", "reject", "", ""])
         run_mesh_review(state, pipeline_dir, ui, cfg)
         for m in state.meshes:
             assert m.status == MeshStatus.QUEUED
 
     def test_poly_count_update_saved_to_state(self, state_with_approved_arts, pipeline_dir, cfg):
         state = self._setup(state_with_approved_arts, pipeline_dir, cfg)
-        # First mesh: reject with poly count update. Second: approve. Third: reject. Fourth: approve.
-        ui = MockPromptInterface(["reject", "4000", "approve asset1", "approve asset2"])
+        # First mesh: reject with poly count update, symmetry(blank). Second: approve.
+        ui = MockPromptInterface(["reject", "4000", "", "approve asset1", "approve asset2"])
         run_mesh_review(state, pipeline_dir, ui, cfg)
         assert state.num_polys == 4000
+
+    def test_symmetrize_update_saved_to_state(self, state_with_approved_arts, pipeline_dir, cfg):
+        state = self._setup(state_with_approved_arts, pipeline_dir, cfg)
+        assert state.symmetrize is False
+        # reject first mesh, enable symmetrize with x- axis; approve rest
+        ui = MockPromptInterface(["reject", "", "x-", "approve asset1", "approve asset2"])
+        run_mesh_review(state, pipeline_dir, ui, cfg)
+        assert state.symmetrize is True
+        assert state.symmetry_axis.value == "x-"
+
+    def test_symmetrize_off_saved_to_state(self, state_with_approved_arts, pipeline_dir, cfg):
+        state = self._setup(state_with_approved_arts, pipeline_dir, cfg)
+        state.symmetrize = True
+        # reject first mesh, disable symmetrize; approve rest
+        ui = MockPromptInterface(["reject", "", "off", "approve asset1", "approve asset2"])
+        run_mesh_review(state, pipeline_dir, ui, cfg)
+        assert state.symmetrize is False
 
     def test_pipeline_status_becomes_approved(self, state_with_approved_arts, pipeline_dir, cfg):
         state = self._setup(state_with_approved_arts, pipeline_dir, cfg)

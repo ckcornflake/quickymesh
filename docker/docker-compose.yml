@@ -1,0 +1,62 @@
+services:
+
+  # -----------------------------------------------------------------------
+  # ComfyUI SDXL — Juggernaut-XL concept art generation
+  # Port 8189 | Python 3.11 | PyTorch 2.10.0+cu128
+  # -----------------------------------------------------------------------
+  comfyui-sdxl:
+    build:
+      context: ./comfyui
+      dockerfile: Dockerfile
+    image: comfyui-sdxl:latest
+    container_name: comfyui-sdxl
+    ports:
+      - "8189:8189"
+    volumes:
+      - ${SDXL_MODELS_DIR:-./models/sdxl}:/app/models
+      - ${SDXL_OUTPUT_DIR:-./output/sdxl}:/app/output
+      - ${SDXL_INPUT_DIR:-./input/sdxl}:/app/input
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
+  # ComfyUI Trellis2 — Image-to-3D mesh generation
+  # Port 8190 | Python 3.12 | PyTorch 2.8.0+cu128
+  # -----------------------------------------------------------------------
+  comfyui-trellis:
+    build:
+      context: ./comfyui-trellis
+      dockerfile: Dockerfile
+    image: comfyui-trellis:latest
+    container_name: comfyui-trellis
+    ports:
+      - "8190:8190"
+    volumes:
+      - ${TRELLIS_MODELS_DIR:-./models/trellis}:/app/models
+      - ${TRELLIS_OUTPUT_DIR:-./output/trellis}:/app/output
+      - ${TRELLIS_INPUT_DIR:-./input/trellis}:/app/input
+      - trellis-hf-cache:/home/comfy/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    restart: unless-stopped
+
+volumes:
+  # Persists HuggingFace model cache (BiRefNet etc.) across container restarts
+  trellis-hf-cache:

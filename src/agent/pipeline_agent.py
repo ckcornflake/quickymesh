@@ -84,12 +84,14 @@ class PipelineAgent:
         trellis_worker: "TrellisWorker",
         screenshot_worker: "ScreenshotWorker",
         *,
+        flux_concept_worker: "ConceptArtWorker | None" = None,
         poll_interval: float = 1.0,
     ) -> None:
         self._broker = broker
         self._arbiter = arbiter
         self._cfg = cfg
         self._concept_worker = concept_worker
+        self._flux_concept_worker = flux_concept_worker
         self._trellis_worker = trellis_worker
         self._screenshot_worker = screenshot_worker
         self._poll_interval = poll_interval
@@ -113,6 +115,7 @@ class PipelineAgent:
                 self._stop_event,
                 self._concept_worker,
                 self._cfg,
+                flux_worker=self._flux_concept_worker,
                 poll_interval=self._poll_interval,
             ),
             TrellisWorkerThread(
@@ -156,6 +159,9 @@ class PipelineAgent:
         num_polys: int | None = None,
         *,
         input_image_path: str | None = None,
+        symmetrize: bool = False,
+        symmetry_axis: str = "auto",
+        concept_art_backend: str = "gemini",
     ) -> PipelineState:
         """
         Create a new pipeline directory, initial state, and enqueue the
@@ -163,6 +169,7 @@ class PipelineAgent:
 
         Returns the freshly created PipelineState.
         """
+        from src.state import SymmetryAxis
         pipeline_dir = self._cfg.uncompleted_pipelines_dir / name
         pipeline_dir.mkdir(parents=True, exist_ok=True)
 
@@ -171,6 +178,9 @@ class PipelineAgent:
             description=description,
             num_polys=num_polys or self._cfg.num_polys,
             input_image_path=input_image_path,
+            symmetrize=symmetrize,
+            symmetry_axis=SymmetryAxis(symmetry_axis),
+            concept_art_backend=concept_art_backend,
             pipeline_dir=str(
                 pipeline_dir.relative_to(self._cfg.output_root)
             ),

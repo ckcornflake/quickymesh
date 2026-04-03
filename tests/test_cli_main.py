@@ -107,8 +107,8 @@ class TestIdleMenu:
         assert result == "status"
 
     def test_returns_new_on_n(self, agent, cfg):
-        # blank image path → skip image → description → polys
-        ui = MockPromptInterface(responses=["n", "mymodel", "", "a dragon", ""])
+        # name → backend(default) → imgpath(blank) → description → polys → sym
+        ui = MockPromptInterface(responses=["n", "mymodel", "", "", "a dragon", "", ""])
         result = _idle_menu(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
         assert result == "new"
 
@@ -131,14 +131,14 @@ class TestIdleMenu:
 
 
 class TestStartNewPipeline:
-    # Response order: name, image-path (blank), description, poly-count
+    # Response order: name, backend(blank=default), image-path(blank), description, poly-count, symmetrize
     def test_creates_pipeline(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "", "a red sphere", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "", "a red sphere", "", ""])
         _start_new_pipeline(agent, ui)
         assert "testpipe" in agent.list_pipeline_names()
 
     def test_informs_user_on_success(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "", "a red sphere", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "", "a red sphere", "", ""])
         _start_new_pipeline(agent, ui)
         assert any("testpipe" in m for m in ui.messages)
 
@@ -148,26 +148,47 @@ class TestStartNewPipeline:
         assert agent.list_pipeline_names() == []
 
     def test_cancels_on_empty_description(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "", ""])
+        # name → backend → imgpath → empty description → cancel
+        ui = MockPromptInterface(responses=["testpipe", "", "", ""])
         _start_new_pipeline(agent, ui)
         assert agent.list_pipeline_names() == []
 
     def test_uses_custom_polys(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "", "a dragon", "12000"])
+        ui = MockPromptInterface(responses=["testpipe", "", "", "a dragon", "12000", ""])
         _start_new_pipeline(agent, ui)
         state = agent.get_pipeline_state("testpipe")
         assert state.num_polys == 12000
 
     def test_uses_default_polys_on_empty_input(self, agent, cfg):
-        ui = MockPromptInterface(responses=["testpipe", "", "a dragon", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "", "a dragon", "", ""])
         _start_new_pipeline(agent, ui)
         state = agent.get_pipeline_state("testpipe")
         assert state.num_polys == cfg.num_polys
 
     def test_informs_user_of_suffix(self, agent, cfg):
-        ui = MockPromptInterface(responses=["testpipe", "", "a dragon", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "", "a dragon", "", ""])
         _start_new_pipeline(agent, ui)
         assert any(cfg.background_suffix in m for m in ui.messages)
+
+    def test_backend_gemini_saved_to_state(self, agent):
+        ui = MockPromptInterface(responses=["testpipe", "1", "", "a dragon", "", ""])
+        _start_new_pipeline(agent, ui)
+        state = agent.get_pipeline_state("testpipe")
+        assert state.concept_art_backend == "gemini"
+
+    def test_backend_flux_saved_to_state(self, agent):
+        # FLUX skips the image-path prompt
+        ui = MockPromptInterface(responses=["testpipe", "2", "a dragon", "", ""])
+        _start_new_pipeline(agent, ui)
+        state = agent.get_pipeline_state("testpipe")
+        assert state.concept_art_backend == "flux"
+
+    def test_backend_preference_persisted(self, agent, cfg):
+        ui = MockPromptInterface(responses=["testpipe", "2", "a dragon", "", ""])
+        _start_new_pipeline(agent, ui)
+        import json
+        prefs = json.loads((cfg.output_root / ".preferences.json").read_text())
+        assert prefs["concept_art_backend"] == "flux"
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +453,8 @@ class TestRunCli:
         assert len(agent._threads) == 0
 
     def test_run_cli_handles_new_pipeline_then_quit(self, agent, cfg):
-        # menu=n, name, image-path(blank), description, poly-count(blank), menu=q
-        ui = MockPromptInterface(responses=["n", "mymodel", "", "a sphere", "", "q"])
+        # menu=n, name, backend(blank), imgpath(blank), description, polys(blank), sym(blank), menu=q
+        ui = MockPromptInterface(responses=["n", "mymodel", "", "", "a sphere", "", "", "q"])
         run_cli(agent, ui, cfg,
                 concept_worker=MockConceptArtWorker(),
                 trellis_worker=MockTrellisWorker())
@@ -536,8 +557,8 @@ class TestHandlePriorityPipelineMeshReview:
 
     def test_all_rejected_requeues_mesh_generation(self, agent, cfg, broker):
         state_path = self._setup(agent, cfg)
-        # reject both meshes; poly prompt gets empty Enter
-        ui = MockPromptInterface(responses=["reject", "", "reject", ""])
+        # reject both meshes; poly(blank), symmetry(blank) for each
+        ui = MockPromptInterface(responses=["reject", "", "", "reject", "", ""])
         _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
 
         tasks = broker.get_tasks(task_type="mesh_generate", pipeline_name="p1")
@@ -545,7 +566,7 @@ class TestHandlePriorityPipelineMeshReview:
 
     def test_all_rejected_returns_false(self, agent, cfg):
         state_path = self._setup(agent, cfg)
-        ui = MockPromptInterface(responses=["reject", "", "reject", ""])
+        ui = MockPromptInterface(responses=["reject", "", "", "reject", "", ""])
         result = _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
         assert result is False
 

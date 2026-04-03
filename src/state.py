@@ -129,6 +129,9 @@ class PipelineState(BaseModel):
     concept_arts: list[ConceptArtItem] = Field(default_factory=list)
     meshes: list[MeshItem] = Field(default_factory=list)
 
+    # Which generator was used for concept art: "gemini" or "flux"
+    concept_art_backend: str = "gemini"
+
     # Set to True after showing the concept-art review sheet; reset to False
     # whenever images change (regenerate / modify) so the sheet re-opens.
     concept_art_sheet_shown: bool = False

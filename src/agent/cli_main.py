@@ -70,6 +70,7 @@ def run_cli(
     concept_worker=None,
     trellis_worker=None,
     screenshot_worker=None,
+    restyle_worker=None,
 ) -> None:
     """
     Main CLI loop.  Runs until the user quits.
@@ -82,12 +83,13 @@ def run_cli(
     concept_worker:     Passed through to run_concept_art_review (real or mock).
     trellis_worker:     Passed through to run_mesh_review.
     screenshot_worker:  Not currently used in reviews but available.
+    restyle_worker:     Optional ControlNetRestyleWorker for concept art restyling.
     """
     agent.start_workers()
     ui.inform("quickymesh started.  Workers are running in the background.")
 
     try:
-        _main_loop(agent, ui, cfg, concept_worker, trellis_worker)
+        _main_loop(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker)
     finally:
         agent.stop_workers()
         ui.inform("Workers stopped.  Goodbye.")
@@ -98,15 +100,15 @@ def run_cli(
 # ---------------------------------------------------------------------------
 
 
-def _main_loop(agent, ui, cfg, concept_worker, trellis_worker) -> None:
+def _main_loop(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker=None) -> None:
     while True:
         priority = agent.highest_priority_pipeline()
         if priority is not None:
-            quit_requested = _handle_priority_pipeline(priority, agent, ui, cfg, concept_worker, trellis_worker)
+            quit_requested = _handle_priority_pipeline(priority, agent, ui, cfg, concept_worker, trellis_worker, restyle_worker)
             if quit_requested:
                 break
         else:
-            action = _idle_menu(agent, ui, cfg, concept_worker, trellis_worker)
+            action = _idle_menu(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker)
             if action == "quit":
                 break
 
@@ -116,7 +118,7 @@ def _main_loop(agent, ui, cfg, concept_worker, trellis_worker) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _idle_menu(agent, ui, cfg, concept_worker, trellis_worker) -> str:
+def _idle_menu(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker=None) -> str:
     """Display idle menu, with a live notification when approvals are pending.
 
     Pressing Enter (empty input) immediately surfaces any waiting approval.
@@ -151,7 +153,7 @@ def _idle_menu(agent, ui, cfg, concept_worker, trellis_worker) -> str:
         _show_status(agent, ui)
         return "status"
     if choice == "w":
-        _watch_mode(agent, ui, cfg, concept_worker, trellis_worker)
+        _watch_mode(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker)
         return "watch"
     if choice == "r":
         _retry_failed(agent, ui)
@@ -314,31 +316,84 @@ def _edit_pipeline(agent, ui, cfg) -> None:
     ui.inform(f"Pipeline '{name}' updated.")
 
 
+def _load_prefs(cfg) -> dict:
+    """Load user preferences from {output_root}/.preferences.json."""
+    import json
+    path = cfg.output_root / ".preferences.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_prefs(cfg, prefs: dict) -> None:
+    """Persist user preferences to {output_root}/.preferences.json."""
+    import json
+    path = cfg.output_root / ".preferences.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+
+
 def _start_new_pipeline(agent, ui) -> None:
     name = ui.ask("Pipeline name (no spaces):").strip()
     if not name:
         ui.inform("Cancelled.")
         return
 
-    # Optional input image — loop until the user supplies a valid path or leaves blank
+    # ── Concept art backend ────────────────────────────────────────────────
+    prefs = _load_prefs(agent._cfg)
+    default_backend = prefs.get("concept_art_backend", "gemini")
+    ui.inform(
+        "Choose concept art generator:\n"
+        "  1. Gemini Flash  — requires API key, small cost per image, "
+        "very accurate results, can use an existing image as a base\n"
+        "  2. FLUX.1 [dev]  — runs locally via ComfyUI, ~25 GB models, "
+        "~16 GB VRAM, less accurate\n"
+        f"Default: {default_backend}"
+    )
+    choice = ui.ask("Enter 1 or 2 (Enter to keep default):").strip()
+    if choice == "1":
+        backend = "gemini"
+    elif choice == "2":
+        backend = "flux"
+    else:
+        backend = default_backend
+    _save_prefs(agent._cfg, {**prefs, "concept_art_backend": backend})
+
+    # Check/prompt for Gemini API key before proceeding
+    if backend == "gemini":
+        try:
+            agent._cfg.gemini_api_key  # raises EnvironmentError if missing
+        except EnvironmentError:
+            key = ui.ask(
+                "No Gemini API key found. Enter your GEMINI_API_KEY (or leave blank to cancel):"
+            ).strip()
+            if not key:
+                ui.inform("Gemini API key required. Cancelled.")
+                return
+            os.environ["GEMINI_API_KEY"] = key
+
+    # ── Optional input image (Gemini only — FLUX generates from prompt) ────
     input_image_path: str | None = None
-    while True:
-        img_raw = ui.ask(
-            "Base concept art on an existing image? "
-            "Enter a path (absolute or relative to pipeline root), or leave blank:"
-        ).strip()
-        if not img_raw:
-            break                          # user wants prompt-only generation
+    if backend == "gemini":
+        while True:
+            img_raw = ui.ask(
+                "Base concept art on an existing image? "
+                "Enter a path (absolute or relative to pipeline root), or leave blank:"
+            ).strip()
+            if not img_raw:
+                break
 
-        from pathlib import Path as _Path
-        p = _Path(img_raw)
-        candidate = p if p.is_absolute() else agent._cfg.output_root / img_raw
-        if candidate.exists():
-            input_image_path = str(candidate)
-            ui.inform(f"Image found: {candidate}")
-            break
-        ui.inform(f"Image not found: {candidate}\nPlease try again, or press Enter to skip.")
+            from pathlib import Path as _Path
+            p = _Path(img_raw)
+            candidate = p if p.is_absolute() else agent._cfg.output_root / img_raw
+            if candidate.exists():
+                input_image_path = str(candidate)
+                ui.inform(f"Image found: {candidate}")
+                break
+            ui.inform(f"Image not found: {candidate}\nPlease try again, or press Enter to skip.")
 
+    # ── Description ────────────────────────────────────────────────────────
     suffix = agent._cfg.background_suffix
     if input_image_path:
         description = ui.ask("How do you want to change/adapt this image?").strip()
@@ -354,9 +409,31 @@ def _start_new_pipeline(agent, ui) -> None:
         ui.inform("Cancelled.")
         return
 
+    # ── Polygon count ──────────────────────────────────────────────────────
     polys_str = ui.ask(f"Target polygon count (Enter for default {agent._cfg.num_polys}):").strip()
     num_polys = int(polys_str) if polys_str.isdigit() else None
-    agent.start_pipeline(name, description, num_polys, input_image_path=input_image_path)
+
+    # ── Symmetry ───────────────────────────────────────────────────────────
+    _SYM_OPTIONS = ["auto", "x-", "x+", "y-", "y+", "z-", "z+"]
+    sym_raw = ui.ask(
+        "Symmetrize mesh after generation?\n"
+        f"  Options: {', '.join(_SYM_OPTIONS)}\n"
+        "  Enter an axis to enable (default: auto), or leave blank to skip:"
+    ).strip().lower()
+    if sym_raw in _SYM_OPTIONS:
+        symmetrize, symmetry_axis = True, sym_raw
+    elif not sym_raw:
+        symmetrize, symmetry_axis = True, "auto"   # bare Enter → auto
+    else:
+        symmetrize, symmetry_axis = False, "auto"  # anything else → off
+
+    agent.start_pipeline(
+        name, description, num_polys,
+        input_image_path=input_image_path,
+        symmetrize=symmetrize,
+        symmetry_axis=symmetry_axis,
+        concept_art_backend=backend,
+    )
     ui.inform(f"Pipeline '{name}' started.  Concept art generation queued.")
 
 
@@ -404,6 +481,7 @@ def _watch_mode(
     cfg,
     concept_worker,
     trellis_worker,
+    restyle_worker=None,
     *,
     _tick: float = _WATCH_TICK,
     _status_interval: float = _WATCH_STATUS_INTERVAL,
@@ -450,7 +528,7 @@ def _watch_mode(
                     ts = time.strftime("%H:%M:%S")
                     ui.inform(f"\n[{ts}] !!! APPROVAL NEEDED: {name} !!!")
                     _flush_stdin()
-                    _handle_priority_pipeline(name, agent, ui, cfg, concept_worker, trellis_worker)
+                    _handle_priority_pipeline(name, agent, ui, cfg, concept_worker, trellis_worker, restyle_worker)
                 ui.inform("\nApprovals complete.  Returning to menu.")
                 return
 
@@ -582,7 +660,7 @@ def _flush_stdin() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _handle_priority_pipeline(name, agent, ui, cfg, concept_worker, trellis_worker) -> bool:
+def _handle_priority_pipeline(name, agent, ui, cfg, concept_worker, trellis_worker, restyle_worker=None) -> bool:
     """
     Handle one priority pipeline review.  Returns True if the user asked to quit.
     """
@@ -596,7 +674,7 @@ def _handle_priority_pipeline(name, agent, ui, cfg, concept_worker, trellis_work
 
     if state.status == PipelineStatus.CONCEPT_ART_REVIEW:
         # run_concept_art_review saves state internally on every mutation
-        result = run_concept_art_review(state, concept_worker, pipeline_dir, ui, cfg)
+        result = run_concept_art_review(state, concept_worker, pipeline_dir, ui, cfg, restyle_worker=restyle_worker)
         if result == "approved":
             agent.enqueue_mesh_generation(name)
             ui.inform(f"[{name}] Concept art approved.  Mesh generation queued.")
@@ -617,7 +695,12 @@ def _handle_priority_pipeline(name, agent, ui, cfg, concept_worker, trellis_work
             # in a prior session — the pipeline status is stuck at MESH_REVIEW with no
             # reviewable meshes, causing an infinite spin.  Treat it the same as
             # all_rejected: update status and re-queue mesh generation.
+            #
+            # IMPORTANT: reload state from disk — run_mesh_review already persisted
+            # user changes (e.g. symmetrize=False).  Saving the old in-memory state
+            # object here would silently overwrite those changes.
             state_path = pipeline_dir / "state.json"
+            state = PipelineState.load(state_path)
             from src.state import PipelineStatus as _PS
             state.status = _PS.MESH_GENERATING
             state.save(state_path)

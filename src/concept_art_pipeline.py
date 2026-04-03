@@ -226,8 +226,44 @@ def build_review_sheet(
 _ACTION_APPROVE = "approve"
 _ACTION_REGENERATE = "regenerate"
 _ACTION_MODIFY = "modify"
+_ACTION_RESTYLE = "restyle"
 _ACTION_CANCEL = "cancel"
 _ACTION_QUIT = "quit"
+
+
+def restyle_concept_art(
+    state: PipelineState,
+    restyle_worker,
+    pipeline_dir: Path,
+    index: int,
+    positive: str,
+    negative: str,
+    denoise: float,
+) -> None:
+    """
+    Restyle an existing concept art image using ControlNet Canny.
+
+    Overwrites the existing image file and updates the item's status/prompts.
+    """
+    if index < 0 or index >= len(state.concept_arts):
+        raise IndexError(f"Concept art index {index} out of range")
+
+    item = state.concept_arts[index]
+    if not item.image_path:
+        raise ValueError(f"Concept art {index} has no image to restyle")
+
+    item.status = ConceptArtStatus.MODIFIED
+    item.prompts.append(f"[restyle] {positive}")
+    state.all_prompts.append(f"[restyle:{index}] {positive}")
+
+    existing_bytes = Path(item.image_path).read_bytes()
+    new_bytes = restyle_worker.restyle_image(existing_bytes, positive, negative, denoise)
+
+    dest = _concept_art_path(pipeline_dir, index)
+    _save_concept_art(new_bytes, dest)
+
+    item.image_path = str(dest)
+    item.status = ConceptArtStatus.READY
 
 
 def run_concept_art_review(
@@ -236,6 +272,8 @@ def run_concept_art_review(
     pipeline_dir: Path,
     ui: PromptInterface,
     cfg: Config = _default_config,
+    *,
+    restyle_worker=None,
 ) -> str:
     """
     Drive the interactive concept art review loop.
@@ -253,12 +291,21 @@ def run_concept_art_review(
             state.save(state_path)
             sheet = build_review_sheet(state, pipeline_dir, cfg)
             ui.show_image(sheet)
+            modify_line = (
+                "  modify <idx>           — modify one image via Gemini\n"
+                if worker.supports_modify else ""
+            )
+            restyle_line = (
+                "  restyle <idx>          — restyle image shape/silhouette via ControlNet\n"
+                if restyle_worker is not None else ""
+            )
             ui.inform(
                 f"\nConcept art review for '{state.name}'\n"
                 "Actions:\n"
                 "  approve <indices>      — e.g. 'approve 1 3' to send to mesh gen\n"
                 "  regenerate <idx|all>   — e.g. 'regenerate 2 4' or 'regenerate all'\n"
-                "  modify <idx>           — modify one image via Gemini\n"
+                + modify_line
+                + restyle_line +
                 "  cancel                 — cancel this pipeline\n"
                 "  quit                   — exit the program\n"
             )
@@ -320,6 +367,9 @@ def run_concept_art_review(
 
         # ── modify ─────────────────────────────────────────────────────────
         elif action == _ACTION_MODIFY:
+            if not worker.supports_modify:
+                ui.inform("Image modification is not supported by the current concept art generator (FLUX). Use 'regenerate' instead.")
+                continue
             if len(tokens) < 2 or not tokens[1].isdigit():
                 ui.inform("Usage: modify <index>  e.g. 'modify 3'")
                 continue
@@ -327,11 +377,56 @@ def run_concept_art_review(
             if idx < 0 or idx >= len(state.concept_arts):
                 ui.inform("Index out of range.")
                 continue
-            ui.inform(
-                "WARNING: This will replace the original concept art image."
-            )
+            ui.inform("WARNING: This will replace the original concept art image.")
             instruction = ui.ask(f"Describe the change to make to image {idx + 1}")
             modify_concept_art(state, worker, pipeline_dir, idx, instruction)
+            state.concept_art_sheet_shown = False
+            state.save(state_path)
+
+        # ── restyle ────────────────────────────────────────────────────────
+        elif action == _ACTION_RESTYLE:
+            if restyle_worker is None:
+                ui.inform("ControlNet Restyle is not available. Ensure ComfyUI is running and the worker is configured.")
+                continue
+            if len(tokens) < 2 or not tokens[1].isdigit():
+                ui.inform("Usage: restyle <index>  e.g. 'restyle 2'")
+                continue
+            idx = int(tokens[1]) - 1
+            if idx < 0 or idx >= len(state.concept_arts):
+                ui.inform("Index out of range.")
+                continue
+            ui.inform(
+                "ControlNet Restyle: preserves the shape/silhouette, applies a new visual style.\n"
+                "This will replace the image."
+            )
+            positive = ui.ask(
+                f"Positive prompt for image {idx + 1}\n"
+                "  Comma-separated words/phrases describing the style you want\n"
+                "  e.g. 'zerg, biomechanical, dark chitin, alien, glossy':"
+            ).strip()
+            if not positive:
+                ui.inform("Cancelled.")
+                continue
+            negative = ui.ask(
+                "Negative prompt (comma-separated elements to avoid)\n"
+                "  e.g. 'weapons, people, blurry, low quality, text'\n"
+                "  (Enter to use defaults):"
+            ).strip()
+            if not negative:
+                negative = "blurry, low quality, text, watermark, deformed"
+            denoise_raw = ui.ask(
+                "Denoise strength (0.1–1.0):\n"
+                "  Lower = more faithful to original shape\n"
+                "  Higher = more creative freedom to match style\n"
+                "  (Enter for default 0.75):"
+            ).strip()
+            try:
+                denoise = float(denoise_raw) if denoise_raw else 0.75
+                denoise = max(0.1, min(1.0, denoise))
+            except ValueError:
+                ui.inform("Invalid value — using 0.75.")
+                denoise = 0.75
+            restyle_concept_art(state, restyle_worker, pipeline_dir, idx, positive, negative, denoise)
             state.concept_art_sheet_shown = False
             state.save(state_path)
 
@@ -348,7 +443,13 @@ def run_concept_art_review(
             return "quit"
 
         else:
-            ui.inform(f"Unknown action '{action}'. Valid actions: approve, regenerate, modify, cancel, quit")
+            valid_actions = ["approve", "regenerate"]
+            if worker.supports_modify:
+                valid_actions.append("modify")
+            if restyle_worker is not None:
+                valid_actions.append("restyle")
+            valid_actions += ["cancel", "quit"]
+            ui.inform(f"Unknown action '{action}'. Valid actions: {', '.join(valid_actions)}")
 
 
 # ---------------------------------------------------------------------------

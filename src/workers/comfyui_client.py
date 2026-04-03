@@ -107,6 +107,48 @@ class ComfyUIClient:
         prompt_id = self.queue_workflow(workflow)
         self.wait_for_completion(prompt_id)
 
+    def run_workflow_and_get_history(self, workflow: dict) -> dict:
+        """Queue, wait, and return the history entry (contains node outputs)."""
+        prompt_id = self.queue_workflow(workflow)
+        return self.wait_for_completion(prompt_id)
+
+    # ------------------------------------------------------------------
+    # Image download
+    # ------------------------------------------------------------------
+
+    def free_memory(self) -> None:
+        """
+        Ask ComfyUI to unload all models and free VRAM.
+
+        Call this after a workflow completes so the next (possibly different)
+        model can load without running out of VRAM.  Safe to call even if
+        ComfyUI is not running — errors are logged and swallowed.
+        """
+        try:
+            self._post("/free", {"unload_models": True, "free_memory": True})
+            log.info("ComfyUI: models unloaded from VRAM")
+        except Exception as exc:
+            log.warning("ComfyUI free_memory() failed (non-fatal): %s", exc)
+
+    def get_image(self, filename: str, subfolder: str = "", img_type: str = "output") -> bytes:
+        """
+        Download an image from ComfyUI via the /view endpoint.
+        Used to retrieve SaveImage node outputs after a workflow completes.
+        """
+        params = urllib.parse.urlencode({
+            "filename": filename,
+            "subfolder": subfolder,
+            "type": img_type,
+        })
+        url = f"{self.base_url}/view?{params}"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                return resp.read()
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"Failed to download '{filename}' from ComfyUI: {exc}"
+            ) from None
+
     # ------------------------------------------------------------------
     # Image upload
     # ------------------------------------------------------------------

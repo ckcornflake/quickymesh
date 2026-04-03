@@ -121,16 +121,24 @@ class ConceptArtWorkerThread(_BaseWorkerThread):
         stop_event: threading.Event,
         worker: "ConceptArtWorker",
         cfg: "Config",
+        *,
+        flux_worker: "ConceptArtWorker | None" = None,
         **kwargs,
     ) -> None:
         super().__init__(broker, stop_event, **kwargs)
-        self._worker = worker
+        self._worker = worker            # Gemini (default)
+        self._flux_worker = flux_worker  # FLUX.1 [dev] — None if not configured
         self._cfg = cfg
+
+    def _pick_worker(self, state) -> "ConceptArtWorker":
+        """Return the worker appropriate for this pipeline's concept_art_backend."""
+        if getattr(state, "concept_art_backend", "gemini") == "flux" and self._flux_worker:
+            return self._flux_worker
+        return self._worker
 
     def _handle_task(self, task) -> None:
         from src.concept_art_pipeline import (
             generate_concept_arts,
-            modify_concept_art,
             regenerate_concept_arts,
         )
         from src.state import PipelineState
@@ -138,19 +146,14 @@ class ConceptArtWorkerThread(_BaseWorkerThread):
         state_path = Path(task.payload["state_path"])
         state = PipelineState.load(state_path)
         pipeline_dir = state_path.parent
+        worker = self._pick_worker(state)
 
         if task.task_type == "concept_art_generate":
             indices = task.payload.get("indices")
             if indices is None:
-                generate_concept_arts(state, self._worker, pipeline_dir, self._cfg)
+                generate_concept_arts(state, worker, pipeline_dir, self._cfg)
             else:
-                regenerate_concept_arts(state, self._worker, pipeline_dir, indices, self._cfg)
-            _notify_review_ready(state.name, "concept art")
-
-        elif task.task_type == "concept_art_modify":
-            index = task.payload["index"]
-            instruction = task.payload["instruction"]
-            modify_concept_art(state, self._worker, pipeline_dir, index, instruction)
+                regenerate_concept_arts(state, worker, pipeline_dir, indices, self._cfg)
             _notify_review_ready(state.name, "concept art")
 
         state.save(state_path)
