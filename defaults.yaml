@@ -6,7 +6,7 @@ gemini:
 
 generation:
   # How many concept art images to generate per pipeline
-  num_concept_arts: 4
+  num_concept_arts: 1
   # Default polygon target for Trellis mesh generation
   num_polys: 8000
   # Thumbnail size (px) for review sheet cells
@@ -15,8 +15,9 @@ generation:
   html_preview_size: 512
   # Default mesh export format
   export_format: "glb"
-  # White background suffix appended to every image generation prompt
-  background_suffix: "plain white background"
+  # Suffix appended to every text-only image generation prompt.
+  # Trellis requires these qualities to correctly reconstruct 3D geometry.
+  background_suffix: "3/4 isometric view, three quarters lighting, plain contrasting background, 1:1 ratio"
 
 infrastructure:
   comfyui_url: "http://localhost:8188"

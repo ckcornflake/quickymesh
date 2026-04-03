@@ -36,6 +36,7 @@ from src.workers.trellis import ComfyUITrellisWorker
 
 
 def main() -> None:
+    config.output_root.mkdir(parents=True, exist_ok=True)
     broker = Broker(config.output_root / "tasks.db")
     arbiter = VRAMArbiter()
     ui = CLIPromptInterface()

@@ -90,6 +90,14 @@ class Broker:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_DDL)
+            # Crash recovery: any task left as 'running' from a previous
+            # session will never be re-claimed.  Reset them to 'pending' so
+            # the new session's workers can pick them up.
+            self._conn.execute(
+                "UPDATE tasks SET status='pending', error=NULL, updated_at=? "
+                "WHERE status='running'",
+                (_now(),),
+            )
             self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -189,6 +197,30 @@ class Broker:
             )
             self._conn.commit()
             return cur.rowcount
+
+    def retry_failed_tasks(self, pipeline_name: str) -> int:
+        """
+        Reset all non-cancelled failed tasks for a pipeline back to pending
+        so workers will re-attempt them.  Returns the number of tasks reset.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status='pending', error=NULL, updated_at=? "
+                "WHERE pipeline_name=? AND status='failed' AND (error IS NULL OR error != 'cancelled')",
+                (_now(), pipeline_name),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def pipelines_with_failures(self) -> list[str]:
+        """Return distinct pipeline names that have non-cancelled failed tasks."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT pipeline_name FROM tasks "
+                "WHERE status='failed' AND (error IS NULL OR error != 'cancelled') "
+                "ORDER BY pipeline_name"
+            ).fetchall()
+        return [r["pipeline_name"] for r in rows]
 
     def close(self) -> None:
         with self._lock:

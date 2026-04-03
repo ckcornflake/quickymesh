@@ -7,9 +7,13 @@ from __future__ import annotations
 import yaml
 
 from src.agent.cli_main import (
+    _edit_pipeline,
     _handle_priority_pipeline,
     _idle_menu,
+    _main_loop,
+    _manage_pipeline,
     _print_watch_diffs,
+    _retry_failed,
     _show_status,
     _start_new_pipeline,
     _watch_mode,
@@ -19,8 +23,9 @@ from src.agent.pipeline_agent import PipelineAgent
 from src.broker import Broker
 from src.config import Config
 from src.concept_art_pipeline import generate_concept_arts
+from src.mesh_pipeline import run_mesh_generation, run_mesh_texturing
 from src.prompt_interface.mock import MockPromptInterface
-from src.state import PipelineState, PipelineStatus
+from src.state import ConceptArtStatus, MeshItem, MeshStatus, PipelineState, PipelineStatus
 from src.vram_arbiter import VRAMArbiter
 from src.workers.concept_art import MockConceptArtWorker
 from src.workers.screenshot import MockScreenshotWorker
@@ -102,16 +107,22 @@ class TestIdleMenu:
         assert result == "status"
 
     def test_returns_new_on_n(self, agent, cfg):
-        ui = MockPromptInterface(responses=["n", "mymodel", "a dragon", ""])
+        # blank image path → skip image → description → polys
+        ui = MockPromptInterface(responses=["n", "mymodel", "", "a dragon", ""])
         result = _idle_menu(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
         assert result == "new"
 
     def test_returns_watch_on_w(self, agent, cfg):
-        # Watch mode exits immediately when given 'q' + newline via mock
-        ui = MockPromptInterface(responses=["w", "q"])
-        result = _idle_menu(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker(),
-                            )
-        assert result == "watch"
+        # Patch _watch_mode to a no-op so the test doesn't enter the real loop
+        import src.agent.cli_main as cli_mod
+        original = cli_mod._watch_mode
+        cli_mod._watch_mode = lambda *a, **kw: None
+        try:
+            ui = MockPromptInterface(responses=["w"])
+            result = _idle_menu(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+            assert result == "watch"
+        finally:
+            cli_mod._watch_mode = original
 
 
 # ---------------------------------------------------------------------------
@@ -120,13 +131,14 @@ class TestIdleMenu:
 
 
 class TestStartNewPipeline:
+    # Response order: name, image-path (blank), description, poly-count
     def test_creates_pipeline(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "a red sphere", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "a red sphere", ""])
         _start_new_pipeline(agent, ui)
         assert "testpipe" in agent.list_pipeline_names()
 
     def test_informs_user_on_success(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "a red sphere", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "a red sphere", ""])
         _start_new_pipeline(agent, ui)
         assert any("testpipe" in m for m in ui.messages)
 
@@ -136,21 +148,26 @@ class TestStartNewPipeline:
         assert agent.list_pipeline_names() == []
 
     def test_cancels_on_empty_description(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", ""])
         _start_new_pipeline(agent, ui)
         assert agent.list_pipeline_names() == []
 
     def test_uses_custom_polys(self, agent):
-        ui = MockPromptInterface(responses=["testpipe", "a dragon", "12000"])
+        ui = MockPromptInterface(responses=["testpipe", "", "a dragon", "12000"])
         _start_new_pipeline(agent, ui)
         state = agent.get_pipeline_state("testpipe")
         assert state.num_polys == 12000
 
     def test_uses_default_polys_on_empty_input(self, agent, cfg):
-        ui = MockPromptInterface(responses=["testpipe", "a dragon", ""])
+        ui = MockPromptInterface(responses=["testpipe", "", "a dragon", ""])
         _start_new_pipeline(agent, ui)
         state = agent.get_pipeline_state("testpipe")
         assert state.num_polys == cfg.num_polys
+
+    def test_informs_user_of_suffix(self, agent, cfg):
+        ui = MockPromptInterface(responses=["testpipe", "", "a dragon", ""])
+        _start_new_pipeline(agent, ui)
+        assert any(cfg.background_suffix in m for m in ui.messages)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +233,8 @@ class TestWatchMode:
     We monkey-patch _try_read_char to feed a character sequence.
     """
 
-    def _run_watch(self, agent, cfg, chars, concept_worker=None, trellis_worker=None):
+    def _run_watch(self, agent, cfg, chars, concept_worker=None, trellis_worker=None,
+                   extra_responses=None):
         """
         Drive watch mode by injecting a sequence of characters via
         a patched _try_read_char.  Returns the MockPromptInterface used.
@@ -224,7 +242,9 @@ class TestWatchMode:
         import src.agent.cli_main as cli_mod
 
         char_iter = iter(chars)
-        original = cli_mod._try_read_char
+        original_read = cli_mod._try_read_char
+        original_enter = cli_mod._enter_cbreak
+        original_exit = cli_mod._exit_cbreak
 
         def fake_read():
             try:
@@ -233,8 +253,10 @@ class TestWatchMode:
                 return None
 
         cli_mod._try_read_char = fake_read
+        cli_mod._enter_cbreak = lambda: None   # no-op in tests
+        cli_mod._exit_cbreak = lambda: None
         try:
-            ui = MockPromptInterface()
+            ui = MockPromptInterface(responses=extra_responses or [])
             _watch_mode(
                 agent, ui, cfg,
                 concept_worker or MockConceptArtWorker(),
@@ -244,10 +266,13 @@ class TestWatchMode:
             )
             return ui
         finally:
-            cli_mod._try_read_char = original
+            cli_mod._try_read_char = original_read
+            cli_mod._enter_cbreak = original_enter
+            cli_mod._exit_cbreak = original_exit
 
-    def test_exits_on_q_enter(self, agent, cfg):
-        ui = self._run_watch(agent, cfg, ['q', '\n'])
+    def test_exits_on_single_q(self, agent, cfg):
+        """Single 'q' keypress exits watch mode — no Enter needed."""
+        ui = self._run_watch(agent, cfg, ['q'])
         assert any("menu" in m.lower() for m in ui.messages)
 
     def test_prints_banner_on_entry(self, agent, cfg):
@@ -270,32 +295,11 @@ class TestWatchMode:
         state.status = PipelineStatus.CONCEPT_ART_REVIEW
         state.save(state_path)
 
-        import src.agent.cli_main as cli_mod
-        original = cli_mod._try_read_char
-
-        # Simulate: no keypress until after the review surfaces and is handled
-        # The review itself uses ui.ask() which goes through MockPromptInterface
-        char_iter = iter(['q', '\n'])
-
-        def fake_read():
-            try:
-                return next(char_iter)
-            except StopIteration:
-                return None
-
-        cli_mod._try_read_char = fake_read
-        try:
-            # The mock will handle: approve review → then 'q' exits watch
-            ui = MockPromptInterface(responses=["approve 1 2"])
-            _watch_mode(
-                agent, ui, cfg,
-                MockConceptArtWorker(), MockTrellisWorker(),
-                _tick=0,
-                _status_interval=999,
-            )
-        finally:
-            cli_mod._try_read_char = original
-
+        # After review is handled the 'q' keypress exits watch mode
+        ui = self._run_watch(
+            agent, cfg, ['q'],
+            extra_responses=["approve 1 2"],
+        )
         combined = "\n".join(ui.messages)
         assert "APPROVAL NEEDED" in combined
 
@@ -428,8 +432,370 @@ class TestRunCli:
         assert len(agent._threads) == 0
 
     def test_run_cli_handles_new_pipeline_then_quit(self, agent, cfg):
-        ui = MockPromptInterface(responses=["n", "mymodel", "a sphere", "", "q"])
+        # menu=n, name, image-path(blank), description, poly-count(blank), menu=q
+        ui = MockPromptInterface(responses=["n", "mymodel", "", "a sphere", "", "q"])
         run_cli(agent, ui, cfg,
                 concept_worker=MockConceptArtWorker(),
                 trellis_worker=MockTrellisWorker())
         assert "mymodel" in agent.list_pipeline_names()
+
+
+# ---------------------------------------------------------------------------
+# _handle_priority_pipeline — MESH_REVIEW paths (the bug-prone dispatch layer)
+# ---------------------------------------------------------------------------
+
+
+class TestHandlePriorityPipelineMeshReview:
+    """
+    Every return value from run_mesh_review must be handled by
+    _handle_priority_pipeline.  Missing branches produce silent infinite spins.
+    """
+
+    def _setup(self, agent, cfg, name="p1"):
+        """
+        Create a pipeline with 2 textured meshes ready for review
+        (status = MESH_REVIEW, meshes = TEXTURE_DONE).
+        """
+        agent.start_pipeline(name, "desc")
+        state_path = cfg.uncompleted_pipelines_dir / name / "state.json"
+        pipeline_dir = state_path.parent
+        state = PipelineState.load(state_path)
+        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
+        for ca in state.concept_arts:
+            ca.status = ConceptArtStatus.APPROVED
+        run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
+        run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, cfg)
+        state.status = PipelineStatus.MESH_REVIEW
+        state.save(state_path)
+        return state_path
+
+    # -- no_pending (the bug that was fixed) -----------------------------------
+
+    def test_no_pending_requeues_mesh_generation(self, agent, cfg, broker):
+        """
+        Pipeline in MESH_REVIEW but all meshes already rejected (QUEUED):
+        must enqueue mesh_generate instead of silently spinning.
+        This is the exact bug that caused the program to become unresponsive.
+        """
+        state_path = self._setup(agent, cfg)
+        state = PipelineState.load(state_path)
+        for m in state.meshes:
+            m.status = MeshStatus.QUEUED
+        state.save(state_path)
+
+        ui = MockPromptInterface()  # no responses — review should not show
+        _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+
+        tasks = broker.get_tasks(task_type="mesh_generate", pipeline_name="p1")
+        assert len(tasks) == 1
+
+    def test_no_pending_updates_pipeline_status_to_mesh_generating(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        state = PipelineState.load(state_path)
+        for m in state.meshes:
+            m.status = MeshStatus.QUEUED
+        state.save(state_path)
+
+        ui = MockPromptInterface()
+        _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+
+        reloaded = PipelineState.load(state_path)
+        assert reloaded.status == PipelineStatus.MESH_GENERATING
+
+    def test_no_pending_returns_false(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        state = PipelineState.load(state_path)
+        for m in state.meshes:
+            m.status = MeshStatus.QUEUED
+        state.save(state_path)
+
+        ui = MockPromptInterface()
+        result = _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        assert result is False
+
+    # -- approved --------------------------------------------------------------
+
+    def test_approved_exports_meshes(self, agent, cfg):
+        self._setup(agent, cfg)
+        ui = MockPromptInterface(responses=["approve asset_a", "approve asset_b"])
+        _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+
+        # After export the pipeline is moved to completed_pipelines_dir
+        completed_state = cfg.completed_pipelines_dir / "p1" / "state.json"
+        reloaded = PipelineState.load(completed_state)
+        exported = [m for m in reloaded.meshes if m.status == MeshStatus.EXPORTED]
+        assert len(exported) == 2
+
+    def test_approved_returns_false(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        ui = MockPromptInterface(responses=["approve asset_a", "approve asset_b"])
+        result = _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        assert result is False
+
+    # -- all_rejected ----------------------------------------------------------
+
+    def test_all_rejected_requeues_mesh_generation(self, agent, cfg, broker):
+        state_path = self._setup(agent, cfg)
+        # reject both meshes; poly prompt gets empty Enter
+        ui = MockPromptInterface(responses=["reject", "", "reject", ""])
+        _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+
+        tasks = broker.get_tasks(task_type="mesh_generate", pipeline_name="p1")
+        assert len(tasks) == 1
+
+    def test_all_rejected_returns_false(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        ui = MockPromptInterface(responses=["reject", "", "reject", ""])
+        result = _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        assert result is False
+
+    # -- quit ------------------------------------------------------------------
+
+    def test_quit_returns_true(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        ui = MockPromptInterface(responses=["quit"])
+        result = _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        assert result is True
+
+    # -- cancelled -------------------------------------------------------------
+
+    def test_cancelled_sets_pipeline_status(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        ui = MockPromptInterface(responses=["cancel"])
+        _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+
+        reloaded = PipelineState.load(state_path)
+        assert reloaded.status == PipelineStatus.CANCELLED
+
+    def test_cancelled_returns_false(self, agent, cfg):
+        state_path = self._setup(agent, cfg)
+        ui = MockPromptInterface(responses=["cancel"])
+        result = _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _main_loop restart / re-entry scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestMainLoopRestart:
+    """
+    Simulate starting the program with stale pipeline state from a prior session.
+    These are the hardest bugs to catch without explicit restart tests.
+    """
+
+    def test_no_spin_on_mesh_review_with_all_meshes_rejected(self, agent, cfg):
+        """
+        Core regression test for the infinite-spin bug:
+        a pipeline stuck in MESH_REVIEW with all meshes QUEUED (prior session
+        rejected everything) must not cause the loop to spin without output.
+
+        If the bug regresses, MockPromptInterface raises StopIteration because
+        the loop never reaches the idle menu to consume the 'q' response.
+        """
+        agent.start_pipeline("stuck", "desc")
+        state_path = cfg.uncompleted_pipelines_dir / "stuck" / "state.json"
+        pipeline_dir = state_path.parent
+        state = PipelineState.load(state_path)
+        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
+        for ca in state.concept_arts:
+            ca.status = ConceptArtStatus.APPROVED
+        run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
+        run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, cfg)
+        for m in state.meshes:
+            m.status = MeshStatus.QUEUED         # simulate prior-session rejection
+        state.status = PipelineStatus.MESH_REVIEW  # stuck here after restart
+        state.save(state_path)
+
+        # Workers NOT started — test _main_loop directly to avoid background
+        # threads re-advancing the pipeline state during the test.
+        ui = MockPromptInterface(responses=["q"])
+        _main_loop(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        # Reaching here (without StopIteration) proves the loop exited normally.
+
+    def test_mesh_review_resolved_state_persists(self, agent, cfg):
+        """After resolving a stuck MESH_REVIEW, the persisted status is MESH_GENERATING."""
+        agent.start_pipeline("stuck", "desc")
+        state_path = cfg.uncompleted_pipelines_dir / "stuck" / "state.json"
+        pipeline_dir = state_path.parent
+        state = PipelineState.load(state_path)
+        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
+        for ca in state.concept_arts:
+            ca.status = ConceptArtStatus.APPROVED
+        run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
+        run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, cfg)
+        for m in state.meshes:
+            m.status = MeshStatus.QUEUED
+        state.status = PipelineStatus.MESH_REVIEW
+        state.save(state_path)
+
+        ui = MockPromptInterface(responses=["q"])
+        _main_loop(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+
+        reloaded = PipelineState.load(state_path)
+        assert reloaded.status == PipelineStatus.MESH_GENERATING
+
+
+# ---------------------------------------------------------------------------
+# _manage_pipeline (pause / resume / cancel)
+# ---------------------------------------------------------------------------
+
+
+class TestManagePipeline:
+    def test_no_pipelines_message(self, agent, cfg):
+        ui = MockPromptInterface(responses=[])
+        _manage_pipeline(agent, ui, cfg)
+        assert any("No pipelines" in m for m in ui.messages)
+
+    def test_cancel_on_empty_selection(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        ui = MockPromptInterface(responses=[""])
+        _manage_pipeline(agent, ui, cfg)
+        assert any("Cancelled" in m for m in ui.messages)
+
+    def test_pause_pipeline(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        ui = MockPromptInterface(responses=["1", "p"])
+        _manage_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.status == PipelineStatus.PAUSED
+
+    def test_cancel_pipeline_from_manage(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        ui = MockPromptInterface(responses=["1", "c"])
+        _manage_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.status == PipelineStatus.CANCELLED
+
+    def test_resume_paused_pipeline(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        # Pause it first directly via agent
+        agent.pause_pipeline("pipe1", cfg)
+        ui = MockPromptInterface(responses=["1", "r"])
+        _manage_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.status != PipelineStatus.PAUSED
+
+    def test_shows_pipeline_list(self, agent, cfg):
+        agent.start_pipeline("mypipe", "desc")
+        ui = MockPromptInterface(responses=[""])
+        _manage_pipeline(agent, ui, cfg)
+        assert any("mypipe" in m for m in ui.messages)
+
+
+# ---------------------------------------------------------------------------
+# _edit_pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestEditPipeline:
+    def test_no_editable_pipelines_message(self, agent, cfg):
+        # Pipeline in MESH_GENERATING is not editable
+        agent.start_pipeline("pipe1", "desc")
+        state_path = cfg.uncompleted_pipelines_dir / "pipe1" / "state.json"
+        state = PipelineState.load(state_path)
+        state.status = PipelineStatus.MESH_GENERATING
+        state.save(state_path)
+
+        ui = MockPromptInterface(responses=[])
+        _edit_pipeline(agent, ui, cfg)
+        assert any("No editable" in m for m in ui.messages)
+
+    def test_cancel_on_empty_selection(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        ui = MockPromptInterface(responses=[""])
+        _edit_pipeline(agent, ui, cfg)
+        assert any("Cancelled" in m for m in ui.messages)
+
+    def test_edit_changes_description(self, agent, cfg):
+        agent.start_pipeline("pipe1", "a sphere")
+        # responses: pipeline number, new description, empty poly, empty symmetry
+        ui = MockPromptInterface(responses=["1", "a cube", "", ""])
+        _edit_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.description == "a cube"
+
+    def test_edit_changes_poly_count(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        # responses: pipeline number, keep description, new poly count, empty symmetry
+        ui = MockPromptInterface(responses=["1", "", "16000", ""])
+        _edit_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.num_polys == 16000
+
+    def test_edit_enables_symmetrize(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        # responses: number, keep desc, keep polys, enable sym, keep axis
+        ui = MockPromptInterface(responses=["1", "", "", "y", ""])
+        _edit_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.symmetrize is True
+
+    def test_edit_disables_symmetrize(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        state_path = cfg.uncompleted_pipelines_dir / "pipe1" / "state.json"
+        state = PipelineState.load(state_path)
+        state.symmetrize = True
+        state.save(state_path)
+
+        ui = MockPromptInterface(responses=["1", "", "", "n"])
+        _edit_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.symmetrize is False
+
+    def test_empty_description_keeps_original(self, agent, cfg):
+        agent.start_pipeline("pipe1", "original desc")
+        ui = MockPromptInterface(responses=["1", "", "", ""])
+        _edit_pipeline(agent, ui, cfg)
+        state = agent.get_pipeline_state("pipe1")
+        assert state.description == "original desc"
+
+
+# ---------------------------------------------------------------------------
+# _retry_failed
+# ---------------------------------------------------------------------------
+
+
+class TestRetryFailed:
+    def test_no_failures_message(self, agent, cfg):
+        ui = MockPromptInterface(responses=[])
+        _retry_failed(agent, ui)
+        assert any("No pipelines have failed tasks" in m for m in ui.messages)
+
+    def test_retry_resets_failed_task(self, agent, cfg, broker):
+        agent.start_pipeline("pipe1", "desc")
+        tasks = broker.get_tasks(pipeline_name="pipe1")
+        assert tasks, "fixture should have enqueued a concept_art_generate task"
+        broker.mark_failed(tasks[0].id, "test error")
+
+        ui = MockPromptInterface(responses=["1"])
+        _retry_failed(agent, ui)
+
+        tasks_after = broker.get_tasks(pipeline_name="pipe1")
+        assert any(t.status == "pending" for t in tasks_after)
+
+    def test_retry_all_resets_all_pipelines(self, agent, cfg, broker):
+        agent.start_pipeline("pipe1", "desc")
+        agent.start_pipeline("pipe2", "desc")
+        for name in ("pipe1", "pipe2"):
+            tasks = broker.get_tasks(pipeline_name=name)
+            broker.mark_failed(tasks[0].id, "error")
+
+        ui = MockPromptInterface(responses=["a"])
+        _retry_failed(agent, ui)
+
+        for name in ("pipe1", "pipe2"):
+            tasks = broker.get_tasks(pipeline_name=name)
+            assert any(t.status == "pending" for t in tasks)
+
+    def test_cancel_on_empty_input(self, agent, cfg, broker):
+        agent.start_pipeline("pipe1", "desc")
+        tasks = broker.get_tasks(pipeline_name="pipe1")
+        broker.mark_failed(tasks[0].id, "error")
+
+        ui = MockPromptInterface(responses=[""])
+        _retry_failed(agent, ui)
+        # task should remain failed (no retry happened)
+        tasks_after = broker.get_tasks(pipeline_name="pipe1")
+        assert all(t.status == "failed" for t in tasks_after)

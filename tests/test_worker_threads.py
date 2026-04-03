@@ -532,9 +532,9 @@ class TestPipelineChaining:
             broker, stop_event, MockTrellisWorker(), arbiter, cfg, poll_interval=0.01
         )
         t.start()
-        assert self._wait_for(broker, "pending"), "screenshot was never enqueued"
+        assert self._wait_for(broker, "pending"), "mesh_cleanup was never enqueued"
         stop_event.set()
         t.join(timeout=3)
 
-        screenshot_tasks = broker.get_tasks(task_type="screenshot")
-        assert len(screenshot_tasks) >= 1
+        cleanup_tasks = broker.get_tasks(task_type="mesh_cleanup")
+        assert len(cleanup_tasks) >= 1

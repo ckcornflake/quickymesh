@@ -13,6 +13,9 @@ Run via BlenderScreenshotWorker (never directly):
 
 Exit code 0 = success.  Each rendered view is saved as:
     {output_dir}/{prefix}_{view_name}.png
+
+Note: mesh cleanup (shade-smooth, symmetrize) is handled by cleanup.py and
+runs before this script.  This script renders the mesh as-is.
 """
 
 import bpy

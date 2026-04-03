@@ -135,6 +135,7 @@ class PipelineAgent:
         for t in self._threads:
             t.start()
         log.info("Worker threads started (%d threads)", len(self._threads))
+        self.recover_stalled_pipelines()
 
     def stop_workers(self, timeout: float = 5.0) -> None:
         """Signal all threads to stop and wait for them to exit."""
@@ -153,6 +154,8 @@ class PipelineAgent:
         name: str,
         description: str,
         num_polys: int | None = None,
+        *,
+        input_image_path: str | None = None,
     ) -> PipelineState:
         """
         Create a new pipeline directory, initial state, and enqueue the
@@ -167,6 +170,7 @@ class PipelineAgent:
             name=name,
             description=description,
             num_polys=num_polys or self._cfg.num_polys,
+            input_image_path=input_image_path,
             pipeline_dir=str(
                 pipeline_dir.relative_to(self._cfg.output_root)
             ),
@@ -237,6 +241,69 @@ class PipelineAgent:
         """Cancel all pending/running broker tasks for a pipeline."""
         return self._broker.cancel_pipeline_tasks(name)
 
+    def pause_pipeline(self, name: str, cfg=None) -> None:
+        """
+        Pause a pipeline: cancel in-flight broker tasks and set status to PAUSED.
+        The state file is preserved so the pipeline can be resumed.
+        """
+        self._broker.cancel_pipeline_tasks(name)
+        cfg = cfg or self._cfg
+        state_path = cfg.uncompleted_pipelines_dir / name / "state.json"
+        if state_path.exists():
+            state = PipelineState.load(state_path)
+            state.status = PipelineStatus.PAUSED
+            state.save(state_path)
+            log.info("Pipeline '%s' paused", name)
+
+    def resume_pipeline(self, name: str) -> None:
+        """
+        Resume a paused pipeline by re-enqueueing the appropriate next task,
+        using the same logic as recover_stalled_pipelines.
+        """
+        state = self.get_pipeline_state(name)
+        if state is None:
+            return
+        if state.status != PipelineStatus.PAUSED:
+            log.warning("resume_pipeline called on '%s' which is not paused (status=%s)", name, state.status)
+            return
+        # Restore to the status it had before pausing by inspecting mesh/art progress
+        state_path = self._cfg.uncompleted_pipelines_dir / name / "state.json"
+        payload = {"pipeline_name": name, "state_path": str(state_path)}
+
+        # Figure out where the pipeline was based on mesh item statuses
+        if not state.meshes:
+            # No meshes — was in concept art or mesh-not-started phase
+            from src.state import ConceptArtStatus
+            any_approved = any(ca.status == ConceptArtStatus.APPROVED for ca in state.concept_arts)
+            if any_approved:
+                state.status = PipelineStatus.MESH_GENERATING
+                state.save(state_path)
+                if not self._broker.has_pending_or_running(name, "mesh_generate"):
+                    self._broker.enqueue(name, "mesh_generate", payload)
+            else:
+                state.status = PipelineStatus.CONCEPT_ART_GENERATING
+                state.save(state_path)
+                if not self._broker.has_pending_or_running(name, "concept_art_generate"):
+                    self._broker.enqueue(name, "concept_art_generate", payload)
+        else:
+            # Meshes exist — restore mesh_generating and re-enqueue the right step
+            state.status = PipelineStatus.MESH_GENERATING
+            state.save(state_path)
+            mesh_statuses = {m.status for m in state.meshes}
+            if MeshStatus.CLEANUP_DONE in mesh_statuses or MeshStatus.SCREENSHOT_DONE in mesh_statuses:
+                if not self._broker.has_pending_or_running(name, "screenshot"):
+                    self._broker.enqueue(name, "screenshot", payload)
+            elif MeshStatus.TEXTURE_DONE in mesh_statuses:
+                if not self._broker.has_pending_or_running(name, "mesh_cleanup"):
+                    self._broker.enqueue(name, "mesh_cleanup", payload)
+            elif MeshStatus.MESH_DONE in mesh_statuses:
+                if not self._broker.has_pending_or_running(name, "mesh_texture"):
+                    self._broker.enqueue(name, "mesh_texture", payload)
+            else:
+                if not self._broker.has_pending_or_running(name, "mesh_generate"):
+                    self._broker.enqueue(name, "mesh_generate", payload)
+        log.info("Pipeline '%s' resumed", name)
+
     # ------------------------------------------------------------------
     # Priority prompting
     # ------------------------------------------------------------------
@@ -269,3 +336,66 @@ class PipelineAgent:
             if state and state.status in review_statuses:
                 result.append(name)
         return result
+
+    def recover_stalled_pipelines(self) -> None:
+        """
+        At startup, inspect each pipeline's state.json and re-enqueue the
+        appropriate broker task if none is already in flight.
+
+        This handles two crash scenarios:
+          1. tasks.db was lost/wiped — pipeline state exists but broker has no
+             record of any task.
+          2. A task completed (status='done') but the worker crashed before
+             enqueueing the next step.
+        """
+        for name in self.list_pipeline_names():
+            state = self.get_pipeline_state(name)
+            if state is None:
+                continue
+            state_path = self._cfg.uncompleted_pipelines_dir / name / "state.json"
+            payload = {"pipeline_name": name, "state_path": str(state_path)}
+
+            if state.status in (PipelineStatus.PAUSED, PipelineStatus.CANCELLED):
+                continue  # paused/cancelled — leave alone until user acts
+
+            if state.status == PipelineStatus.CONCEPT_ART_GENERATING:
+                if not self._broker.has_pending_or_running(name, "concept_art_generate"):
+                    log.info("Recovery: re-enqueueing concept_art_generate for '%s'", name)
+                    self._broker.enqueue(name, "concept_art_generate", payload)
+
+            elif state.status == PipelineStatus.MESH_GENERATING:
+                if not state.meshes:
+                    # No meshes at all — re-enqueue mesh_generate
+                    if not self._broker.has_pending_or_running(name, "mesh_generate"):
+                        log.info("Recovery: re-enqueueing mesh_generate for '%s'", name)
+                        self._broker.enqueue(name, "mesh_generate", payload)
+                else:
+                    mesh_statuses = {m.status for m in state.meshes}
+                    if MeshStatus.CLEANUP_DONE in mesh_statuses or MeshStatus.SCREENSHOT_DONE in mesh_statuses:
+                        # Cleanup done, screenshots missing
+                        if not self._broker.has_pending_or_running(name, "screenshot"):
+                            log.info("Recovery: re-enqueueing screenshot for '%s'", name)
+                            self._broker.enqueue(name, "screenshot", payload)
+                    elif MeshStatus.TEXTURE_DONE in mesh_statuses:
+                        # Texturing done, cleanup missing
+                        if not self._broker.has_pending_or_running(name, "mesh_cleanup"):
+                            log.info("Recovery: re-enqueueing mesh_cleanup for '%s'", name)
+                            self._broker.enqueue(name, "mesh_cleanup", payload)
+                    elif MeshStatus.MESH_DONE in mesh_statuses:
+                        # Mesh generated, texturing missing
+                        if not self._broker.has_pending_or_running(name, "mesh_texture"):
+                            log.info("Recovery: re-enqueueing mesh_texture for '%s'", name)
+                            self._broker.enqueue(name, "mesh_texture", payload)
+                    else:
+                        # No meshes with any completion status — re-run mesh_generate
+                        if not self._broker.has_pending_or_running(name, "mesh_generate"):
+                            log.info("Recovery: re-enqueueing mesh_generate for '%s'", name)
+                            self._broker.enqueue(name, "mesh_generate", payload)
+
+            elif state.status == PipelineStatus.APPROVED:
+                # Review completed but export never ran (e.g. process killed after review)
+                if any(m.status == MeshStatus.APPROVED for m in state.meshes):
+                    from src.mesh_pipeline import run_mesh_export
+                    pipeline_dir = self._cfg.uncompleted_pipelines_dir / name
+                    log.info("Recovery: exporting approved meshes for '%s'", name)
+                    run_mesh_export(state, pipeline_dir, self._cfg)

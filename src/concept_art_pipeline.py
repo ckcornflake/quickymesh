@@ -93,6 +93,13 @@ def generate_concept_arts(
     if not state.concept_arts:
         state.concept_arts = [ConceptArtItem(index=i) for i in range(count)]
 
+    # Load input image bytes once if image-based generation was requested
+    input_image_bytes: bytes | None = None
+    if state.input_image_path:
+        input_path = Path(state.input_image_path)
+        if input_path.exists():
+            input_image_bytes = input_path.read_bytes()
+
     for item in state.concept_arts:
         if item.status not in (ConceptArtStatus.PENDING, ConceptArtStatus.REGENERATING):
             continue
@@ -100,7 +107,11 @@ def generate_concept_arts(
         item.prompts.append(prompt)
 
         dest = _concept_art_path(pipeline_dir, item.index)
-        image_bytes = worker.generate_image(prompt)
+        if input_image_bytes is not None:
+            # Image-based: treat description as the modification instruction
+            image_bytes = worker.modify_image(input_image_bytes, state.description)
+        else:
+            image_bytes = worker.generate_image(prompt)
         _save_concept_art(image_bytes, dest)
 
         item.image_path = str(dest)
@@ -237,23 +248,23 @@ def run_concept_art_review(
     state_path = pipeline_dir / "state.json"
 
     while True:
-        sheet = build_review_sheet(state, pipeline_dir, cfg)
-        ui.show_image(sheet)
-        ui.inform(
-            f"\nConcept art review for '{state.name}'\n"
-            "Actions:\n"
-            "  approve <indices>      — e.g. 'approve 1 3' to send to mesh gen\n"
-            "  regenerate <idx|all>   — e.g. 'regenerate 2 4' or 'regenerate all'\n"
-            "  modify <idx>           — modify one image via Gemini\n"
-            "  cancel                 — cancel this pipeline\n"
-            "  quit                   — exit the program\n"
-        )
+        if not state.concept_art_sheet_shown:
+            state.concept_art_sheet_shown = True
+            state.save(state_path)
+            sheet = build_review_sheet(state, pipeline_dir, cfg)
+            ui.show_image(sheet)
+            ui.inform(
+                f"\nConcept art review for '{state.name}'\n"
+                "Actions:\n"
+                "  approve <indices>      — e.g. 'approve 1 3' to send to mesh gen\n"
+                "  regenerate <idx|all>   — e.g. 'regenerate 2 4' or 'regenerate all'\n"
+                "  modify <idx>           — modify one image via Gemini\n"
+                "  cancel                 — cancel this pipeline\n"
+                "  quit                   — exit the program\n"
+            )
+            for item in state.concept_arts:
+                ui.inform(f"  [{item.index + 1}] {item.status.value}")
 
-        # Also show per-image status
-        for item in state.concept_arts:
-            ui.inform(f"  [{item.index + 1}] {item.status.value}")
-
-        # Optional: allow updating num_polys
         raw = ui.ask("Enter action").lower().strip()
         tokens = raw.split()
         if not tokens:
@@ -288,7 +299,10 @@ def run_concept_art_review(
             if tokens[1] == "all":
                 regen_indices = list(range(len(state.concept_arts)))
                 current_prompt = build_prompt(state.description, cfg.background_suffix)
-                ui.inform(f"Current prompt: {current_prompt}")
+                ui.inform(
+                    f"Current prompt: {current_prompt}\n"
+                    f'(Suffix "{cfg.background_suffix}" will be appended automatically)'
+                )
                 new_desc = ui.ask("New description (Enter to keep current):").strip()
                 description_override = new_desc if new_desc else None
                 regenerate_concept_arts(
@@ -301,6 +315,7 @@ def run_concept_art_review(
                     ui.inform("Invalid indices.")
                     continue
                 regenerate_concept_arts(state, worker, pipeline_dir, regen_indices, cfg)
+            state.concept_art_sheet_shown = False
             state.save(state_path)
 
         # ── modify ─────────────────────────────────────────────────────────
@@ -317,6 +332,7 @@ def run_concept_art_review(
             )
             instruction = ui.ask(f"Describe the change to make to image {idx + 1}")
             modify_concept_art(state, worker, pipeline_dir, idx, instruction)
+            state.concept_art_sheet_shown = False
             state.save(state_path)
 
         # ── cancel / quit ──────────────────────────────────────────────────

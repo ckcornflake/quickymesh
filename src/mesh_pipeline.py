@@ -10,6 +10,7 @@ Public API
 run_mesh_generation(state, worker, pipeline_dir, cfg) -> None
 run_mesh_texturing(state, worker, pipeline_dir, cfg) -> None
 run_mesh_review(state, pipeline_dir, ui, cfg) -> str
+run_mesh_export(state, pipeline_dir, cfg) -> None
 """
 
 from __future__ import annotations
@@ -56,26 +57,57 @@ def run_mesh_generation(
     cfg: Config = _default_config,
 ) -> None:
     """
-    For every approved concept art that does not yet have a MeshItem,
-    run Trellis mesh generation and add a MeshItem to state.
+    For every approved concept art that does not yet have a generated mesh,
+    run Trellis mesh generation.
+
+    QUEUED items (initial state or post-rejection) are regenerated — they
+    represent work that either never started or was explicitly re-queued by
+    the user after rejection.  Items in any other status (in-progress,
+    generated, or further along) are skipped to prevent duplicate work.
 
     Updates state in place.  Caller is responsible for saving state.
     """
-    existing_ca_indices = {m.concept_art_index for m in state.meshes}
+    # Statuses that mean a mesh is already being worked on or is done —
+    # do NOT restart generation for these.
+    _skip_statuses = {
+        MeshStatus.GENERATING_MESH,
+        MeshStatus.MESH_DONE,
+        MeshStatus.GENERATING_TEXTURE,
+        MeshStatus.TEXTURE_DONE,
+        MeshStatus.CLEANING_UP,
+        MeshStatus.CLEANUP_DONE,
+        MeshStatus.SCREENSHOT_PENDING,
+        MeshStatus.SCREENSHOT_DONE,
+        MeshStatus.AWAITING_APPROVAL,
+        MeshStatus.APPROVED,
+        MeshStatus.EXPORTED,
+    }
+    skip_ca_indices = {m.concept_art_index for m in state.meshes if m.status in _skip_statuses}
 
     for ca in state.concept_arts:
         if ca.status != ConceptArtStatus.APPROVED:
             continue
-        if ca.index in existing_ca_indices:
+        if ca.index in skip_ca_indices:
             continue
         if not ca.image_path:
             continue
 
-        sub_name = f"{state.name}_{ca.index + 1}"
-        mesh_item = MeshItem(concept_art_index=ca.index, sub_name=sub_name)
-        state.meshes.append(mesh_item)
+        # Reuse an existing QUEUED item rather than creating a duplicate.
+        existing_queued = next(
+            (m for m in state.meshes
+             if m.concept_art_index == ca.index and m.status == MeshStatus.QUEUED),
+            None,
+        )
+        if existing_queued:
+            mesh_item = existing_queued
+        else:
+            mesh_item = MeshItem(
+                concept_art_index=ca.index,
+                sub_name=f"{state.name}_{ca.index + 1}",
+            )
+            state.meshes.append(mesh_item)
 
-        mesh_dir = _mesh_sub_dir(pipeline_dir, sub_name) / "meshes"
+        mesh_dir = _mesh_sub_dir(pipeline_dir, mesh_item.sub_name) / "meshes"
         job = _job_id(state.name, ca.index)
 
         mesh_item.status = MeshStatus.GENERATING_MESH
@@ -158,45 +190,39 @@ def run_mesh_review(
     state_path = pipeline_dir / "state.json"
 
     # Mark meshes ready for review as AWAITING_APPROVAL.
-    # SCREENSHOT_DONE is the normal path; TEXTURE_DONE is the fallback when
-    # screenshots were skipped (e.g. in tests or --skip-screenshots mode).
-    _ready = {MeshStatus.SCREENSHOT_DONE, MeshStatus.TEXTURE_DONE}
+    # SCREENSHOT_DONE is the normal path; CLEANUP_DONE/TEXTURE_DONE are
+    # fallbacks when the screenshot step was skipped or not yet run.
+    _ready = {MeshStatus.SCREENSHOT_DONE, MeshStatus.CLEANUP_DONE, MeshStatus.TEXTURE_DONE}
     for m in state.meshes:
         if m.status in _ready:
             m.status = MeshStatus.AWAITING_APPROVAL
 
     pending = [m for m in state.meshes if m.status == MeshStatus.AWAITING_APPROVAL]
     if not pending:
-        ui.inform("No meshes are awaiting approval.")
-        return "approved"
+        return "no_pending"
 
     for mesh_item in pending:
-        # Show review sheet if available
-        if mesh_item.review_sheet_path and Path(mesh_item.review_sheet_path).exists():
-            ui.show_image(Path(mesh_item.review_sheet_path))
-        else:
-            ui.inform(f"\n[Mesh {mesh_item.sub_name}] (no screenshots yet — review the textured GLB manually)")
-            if mesh_item.textured_mesh_path:
-                ui.inform(f"  Textured GLB: {mesh_item.textured_mesh_path}")
-
-        ui.inform(
-            f"\nMesh '{mesh_item.sub_name}' is ready for review.\n"
-            "Actions:\n"
-            "  approve <asset_name> [format]  — approve and name the asset\n"
-            "  reject                          — reject this mesh (pipeline continues)\n"
-            "  cancel                          — cancel the pipeline\n"
-            "  quit                            — exit the program"
-        )
-
-        # Optional: update poly count
-        poly_raw = ui.ask(
-            f"Current polygon target: {state.num_polys}. "
-            "Enter a new value to change it, or press Enter to keep:"
-        ).strip()
-        if poly_raw.isdigit() and int(poly_raw) > 0:
-            state.num_polys = int(poly_raw)
-
+        first_prompt = True
         while True:
+            # Show the review sheet and full help text only on the first prompt
+            # for this mesh — never on re-prompts caused by invalid input.
+            if first_prompt:
+                first_prompt = False
+                if mesh_item.review_sheet_path and Path(mesh_item.review_sheet_path).exists():
+                    ui.show_image(Path(mesh_item.review_sheet_path))
+                else:
+                    ui.inform(f"\n[Mesh {mesh_item.sub_name}] (no screenshots — review the GLB manually)")
+                    if mesh_item.textured_mesh_path:
+                        ui.inform(f"  Textured GLB: {mesh_item.textured_mesh_path}")
+                ui.inform(
+                    f"\nMesh '{mesh_item.sub_name}' is ready for review.\n"
+                    "Actions:\n"
+                    "  approve <asset_name> [format]  — approve and name the asset\n"
+                    "  reject                          — reject this mesh (pipeline continues)\n"
+                    "  cancel                          — cancel the pipeline\n"
+                    "  quit                            — exit the program"
+                )
+
             raw = ui.ask("Enter action").strip()
             tokens = raw.split()
             if not tokens:
@@ -228,6 +254,17 @@ def run_mesh_review(
                 break
 
             elif action == "reject":
+                # Offer a poly-count update before re-queuing
+                poly_raw = ui.ask(
+                    f"Current polygon target: {state.num_polys}. "
+                    "Enter a new value to change it, or press Enter to keep:"
+                ).strip().lower()
+                if poly_raw == "quit":
+                    state.save(state_path)
+                    ui.inform("Quitting.")
+                    return "quit"
+                if poly_raw.isdigit() and int(poly_raw) > 0:
+                    state.num_polys = int(poly_raw)
                 mesh_item.status = MeshStatus.QUEUED  # could be re-queued later
                 state.save(state_path)
                 ui.inform(f"Mesh '{mesh_item.sub_name}' rejected.")
@@ -251,5 +288,87 @@ def run_mesh_review(
     if approved:
         state.status = PipelineStatus.APPROVED
         state.save(state_path)
+        return "approved"
 
-    return "approved"
+    # All meshes were rejected — move back to MESH_GENERATING so workers can
+    # re-run mesh generation with the (potentially updated) poly count.
+    state.status = PipelineStatus.MESH_GENERATING
+    state.save(state_path)
+    return "all_rejected"
+
+
+# ---------------------------------------------------------------------------
+# Mesh export to final assets
+# ---------------------------------------------------------------------------
+
+
+def run_mesh_export(
+    state: PipelineState,
+    pipeline_dir: Path,
+    cfg: Config = _default_config,
+) -> None:
+    """
+    Export all APPROVED meshes to the final_game_ready_assets directory.
+
+    For each approved mesh:
+      - Copy textured GLB to final_assets_dir/{final_name}/mesh.{export_format}
+      - Create metadata.txt with pipeline info
+      - Update export_path in state
+    
+    Also moves the entire pipeline from uncompleted_pipelines to completed_pipelines.
+
+    Updates state in place.  Caller is responsible for saving state.
+    """
+    state_path = pipeline_dir / "state.json"
+
+    # Export each approved mesh
+    for mesh_item in state.meshes:
+        if mesh_item.status != MeshStatus.APPROVED:
+            continue
+        if not mesh_item.final_name:
+            continue
+        if not mesh_item.textured_mesh_path:
+            continue
+
+        # Create asset directory
+        asset_dir = cfg.final_assets_dir / mesh_item.final_name
+        asset_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy textured GLB
+        src_glb = Path(mesh_item.textured_mesh_path)
+        dst_glb = asset_dir / f"mesh.{mesh_item.export_format}"
+        if src_glb.exists():
+            dst_glb.write_bytes(src_glb.read_bytes())
+            mesh_item.export_path = str(dst_glb)
+
+        # Write metadata
+        metadata_path = asset_dir / "metadata.txt"
+        ca_index = mesh_item.concept_art_index
+        ca = state.concept_arts[ca_index]
+        metadata_lines = [
+            f"Pipeline: {state.name}",
+            f"Asset name: {mesh_item.final_name}",
+            f"Export format: {mesh_item.export_format}",
+            f"Concept art index: {ca_index}",
+            f"Concept art image: {ca.image_path}",
+            f"Pipeline folder: {pipeline_dir}",
+            f"Created: {state.created_at.isoformat()}",
+        ]
+        metadata_path.write_text("\n".join(metadata_lines) + "\n", encoding="utf-8")
+
+        mesh_item.status = MeshStatus.EXPORTED
+
+    state.save(state_path)
+
+    # Move pipeline from uncompleted to completed
+    import logging, shutil
+    _log = logging.getLogger(__name__)
+    completed_pipeline_dir = cfg.completed_pipelines_dir / state.name
+    if any(m.status == MeshStatus.EXPORTED for m in state.meshes):
+        completed_pipeline_dir.parent.mkdir(parents=True, exist_ok=True)
+        if pipeline_dir.exists() and not completed_pipeline_dir.exists():
+            try:
+                shutil.move(str(pipeline_dir), str(completed_pipeline_dir))
+                _log.info("Pipeline '%s' moved to completed_pipelines", state.name)
+            except Exception as exc:
+                _log.warning("Could not move pipeline dir to completed: %s", exc)

@@ -13,7 +13,7 @@ import yaml
 from src.agent.pipeline_agent import PipelineAgent
 from src.broker import Broker
 from src.config import Config
-from src.state import PipelineState, PipelineStatus
+from src.state import MeshItem, MeshStatus, PipelineState, PipelineStatus
 from src.vram_arbiter import VRAMArbiter
 from src.workers.concept_art import MockConceptArtWorker
 from src.workers.screenshot import MockScreenshotWorker
@@ -306,5 +306,128 @@ class TestWorkerLifecycle:
         try:
             for t in agent._threads:
                 assert t.daemon is True
+        finally:
+            agent.stop_workers(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# recover_stalled_pipelines
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverStalledPipelines:
+    """
+    Verifies that recover_stalled_pipelines re-enqueues the correct next
+    task when a pipeline's broker tasks have vanished (e.g. tasks.db wiped).
+    """
+
+    def _set_status(self, agent, cfg, name, status):
+        sp = cfg.uncompleted_pipelines_dir / name / "state.json"
+        state = PipelineState.load(sp)
+        state.status = status
+        state.save(sp)
+        return sp
+
+    def _add_mesh(self, agent, cfg, name, mesh_status):
+        sp = cfg.uncompleted_pipelines_dir / name / "state.json"
+        state = PipelineState.load(sp)
+        state.meshes.append(MeshItem(concept_art_index=0, sub_name="p1_0_1", status=mesh_status))
+        state.save(sp)
+
+    def test_recovers_concept_art_generating(self, agent, broker, cfg):
+        agent.start_pipeline("p1", "desc")
+        # Drain broker so it looks like tasks.db was wiped
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.CONCEPT_ART_GENERATING)
+
+        agent.recover_stalled_pipelines()
+
+        tasks = broker.get_tasks(pipeline_name="p1", task_type="concept_art_generate")
+        pending = [t for t in tasks if t.status == "pending"]
+        assert len(pending) == 1
+
+    def test_recovers_mesh_generating_no_meshes(self, agent, broker, cfg):
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.MESH_GENERATING)
+
+        agent.recover_stalled_pipelines()
+
+        tasks = broker.get_tasks(pipeline_name="p1", task_type="mesh_generate")
+        pending = [t for t in tasks if t.status == "pending"]
+        assert len(pending) == 1
+
+    def test_recovers_mesh_generating_mesh_done(self, agent, broker, cfg):
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.MESH_GENERATING)
+        self._add_mesh(agent, cfg, "p1", MeshStatus.MESH_DONE)
+
+        agent.recover_stalled_pipelines()
+
+        tasks = broker.get_tasks(pipeline_name="p1", task_type="mesh_texture")
+        pending = [t for t in tasks if t.status == "pending"]
+        assert len(pending) == 1
+
+    def test_recovers_mesh_generating_texture_done(self, agent, broker, cfg):
+        # TEXTURE_DONE means cleanup hasn't run yet — should re-enqueue mesh_cleanup
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.MESH_GENERATING)
+        self._add_mesh(agent, cfg, "p1", MeshStatus.TEXTURE_DONE)
+
+        agent.recover_stalled_pipelines()
+
+        tasks = broker.get_tasks(pipeline_name="p1", task_type="mesh_cleanup")
+        pending = [t for t in tasks if t.status == "pending"]
+        assert len(pending) == 1
+
+    def test_recovers_mesh_generating_cleanup_done(self, agent, broker, cfg):
+        # CLEANUP_DONE means screenshot hasn't run yet
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.MESH_GENERATING)
+        self._add_mesh(agent, cfg, "p1", MeshStatus.CLEANUP_DONE)
+
+        agent.recover_stalled_pipelines()
+
+        tasks = broker.get_tasks(pipeline_name="p1", task_type="screenshot")
+        pending = [t for t in tasks if t.status == "pending"]
+        assert len(pending) == 1
+
+    def test_does_not_double_enqueue_when_task_already_pending(self, agent, broker, cfg):
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.CONCEPT_ART_GENERATING)
+        # Pre-enqueue a task so recovery should skip
+        broker.enqueue("p1", "concept_art_generate", {})
+
+        agent.recover_stalled_pipelines()
+
+        tasks = broker.get_tasks(pipeline_name="p1", task_type="concept_art_generate")
+        pending = [t for t in tasks if t.status == "pending"]
+        assert len(pending) == 1  # not 2
+
+    def test_skips_pipelines_in_review_status(self, agent, broker, cfg):
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.CONCEPT_ART_REVIEW)
+
+        agent.recover_stalled_pipelines()
+
+        # Review pipelines need user input — should not auto-re-enqueue
+        tasks = broker.get_tasks(pipeline_name="p1", status="pending")
+        assert len(tasks) == 0
+
+    def test_recovery_runs_automatically_on_start_workers(self, agent, broker, cfg):
+        agent.start_pipeline("p1", "desc")
+        broker.cancel_pipeline_tasks("p1")
+        self._set_status(agent, cfg, "p1", PipelineStatus.CONCEPT_ART_GENERATING)
+
+        agent.start_workers()
+        try:
+            tasks = broker.get_tasks(pipeline_name="p1", task_type="concept_art_generate")
+            pending = [t for t in tasks if t.status == "pending"]
+            assert len(pending) == 1
         finally:
             agent.stop_workers(timeout=2)

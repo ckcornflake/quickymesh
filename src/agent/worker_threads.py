@@ -33,6 +33,17 @@ log = logging.getLogger(__name__)
 _POLL_INTERVAL = 1.0   # seconds between task-queue polls when idle
 
 
+def _notify_review_ready(pipeline_name: str, review_type: str) -> None:
+    """Print a prominent stdout notice so the user knows to press Enter."""
+    import sys
+    print(
+        f"\n>>> Pipeline '{pipeline_name}' {review_type} review is ready — "
+        "press Enter to review. <<<\n",
+        flush=True,
+        file=sys.stdout,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Base thread
 # ---------------------------------------------------------------------------
@@ -134,11 +145,13 @@ class ConceptArtWorkerThread(_BaseWorkerThread):
                 generate_concept_arts(state, self._worker, pipeline_dir, self._cfg)
             else:
                 regenerate_concept_arts(state, self._worker, pipeline_dir, indices, self._cfg)
+            _notify_review_ready(state.name, "concept art")
 
         elif task.task_type == "concept_art_modify":
             index = task.payload["index"]
             instruction = task.payload["instruction"]
             modify_concept_art(state, self._worker, pipeline_dir, index, instruction)
+            _notify_review_ready(state.name, "concept art")
 
         state.save(state_path)
 
@@ -202,9 +215,9 @@ class TrellisWorkerThread(_BaseWorkerThread):
                     log.info("Chained mesh_texture for '%s'", pipeline_name)
         elif task.task_type == "mesh_texture":
             if any(m.status == MeshStatus.TEXTURE_DONE for m in state.meshes):
-                if not self._broker.has_pending_or_running(pipeline_name, "screenshot"):
-                    self._broker.enqueue(pipeline_name, "screenshot", payload)
-                    log.info("Chained screenshot for '%s'", pipeline_name)
+                if not self._broker.has_pending_or_running(pipeline_name, "mesh_cleanup"):
+                    self._broker.enqueue(pipeline_name, "mesh_cleanup", payload)
+                    log.info("Chained mesh_cleanup for '%s'", pipeline_name)
 
 
 # ---------------------------------------------------------------------------
@@ -214,17 +227,18 @@ class TrellisWorkerThread(_BaseWorkerThread):
 
 class ScreenshotWorkerThread(_BaseWorkerThread):
     """
-    Handles screenshot tasks.
+    Handles mesh_cleanup and screenshot tasks (both use Blender).
 
-    Blender rendering is VRAM-heavy, so the VRAMArbiter is acquired.
+    Both task types are serialised through the VRAMArbiter because Blender
+    rendering is GPU-heavy.
 
     Payload keys
     ------------
-    screenshot:
+    mesh_cleanup / screenshot:
         pipeline_name, state_path
     """
 
-    task_types = ["screenshot"]
+    task_types = ["mesh_cleanup", "screenshot"]
 
     def __init__(
         self,
@@ -241,17 +255,32 @@ class ScreenshotWorkerThread(_BaseWorkerThread):
         self._cfg = cfg
 
     def _handle_task(self, task) -> None:
-        from src.screenshot_pipeline import run_screenshots
-        from src.state import PipelineState, PipelineStatus
+        from src.screenshot_pipeline import run_cleanup, run_screenshots
+        from src.state import MeshStatus, PipelineState, PipelineStatus
 
         state_path = Path(task.payload["state_path"])
+        pipeline_name = task.payload["pipeline_name"]
         state = PipelineState.load(state_path)
         pipeline_dir = state_path.parent
 
-        with self._arbiter.acquire(timeout=self._cfg.vram_lock_timeout):
+        if task.task_type == "mesh_cleanup":
+            # mesh_cleanup is CPU-only (shade smooth + symmetrize geometry ops)
+            # — no VRAM lock needed
+            run_cleanup(state, self._worker, pipeline_dir, self._cfg)
+            state.save(state_path)
+
+            # Chain to screenshot once at least one mesh is cleaned up
+            payload = {"pipeline_name": pipeline_name, "state_path": str(state_path)}
+            if any(m.status == MeshStatus.CLEANUP_DONE for m in state.meshes):
+                if not self._broker.has_pending_or_running(pipeline_name, "screenshot"):
+                    self._broker.enqueue(pipeline_name, "screenshot", payload)
+                    log.info("Chained screenshot for '%s'", pipeline_name)
+
+        elif task.task_type == "screenshot":
             run_screenshots(state, self._worker, pipeline_dir, self._cfg)
 
-        # Screenshots done — surface the mesh review prompt
-        state.status = PipelineStatus.MESH_REVIEW
-        state.save(state_path)
-        log.info("Pipeline '%s' ready for mesh review", task.payload["pipeline_name"])
+            # Screenshots done — surface the mesh review prompt
+            state.status = PipelineStatus.MESH_REVIEW
+            state.save(state_path)
+            log.info("Pipeline '%s' ready for mesh review", pipeline_name)
+            _notify_review_ready(pipeline_name, "mesh")

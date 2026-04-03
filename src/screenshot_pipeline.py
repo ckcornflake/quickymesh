@@ -3,6 +3,7 @@ Screenshot + HTML preview pipeline — orchestration layer.
 
 Public API
 ----------
+run_cleanup(state, worker, pipeline_dir, cfg) -> None
 run_screenshots(state, worker, pipeline_dir, cfg) -> None
 make_html_preview(mesh_path, output_path, size) -> Path
 """
@@ -52,16 +53,69 @@ def make_html_preview(
 
     html = scene_to_html(scene)
 
-    # Inject a <style> block to set the canvas to the requested size
-    size_style = (
-        f"<style>canvas {{ width: {size}px !important; height: {size}px !important; }}</style>"
+    # Inject styles: fixed canvas size, light-gray background, centered layout
+    injected_style = (
+        f"<style>\n"
+        f"  body {{ margin: 0; display: flex; justify-content: center; "
+        f"align-items: center; min-height: 100vh; background: #2a2a2a; }}\n"
+        f"  canvas {{ width: {size}px !important; height: {size}px !important; "
+        f"background: #3c3c3c !important; display: block; }}\n"
+        f"</style>"
     )
-    html = html.replace("</head>", f"{size_style}\n</head>", 1)
+    html = html.replace("</head>", f"{injected_style}\n</head>", 1)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Cleanup orchestration
+# ---------------------------------------------------------------------------
+
+
+def run_cleanup(
+    state: PipelineState,
+    worker: ScreenshotWorker,
+    pipeline_dir: Path,
+    cfg: Config = _default_config,
+) -> None:
+    """
+    Run the mesh cleanup phase for every mesh in TEXTURE_DONE status.
+
+    For each such mesh:
+      1. Call worker.cleanup_mesh() — applies shade-smooth (and symmetrize if
+         enabled) in Blender and exports a new cleaned_mesh.glb.
+      2. Update mesh_item.textured_mesh_path to point at the cleaned file so
+         run_screenshots and run_mesh_export use the cleaned version.
+      3. Advance mesh status to CLEANUP_DONE.
+
+    Updates state in place.  Caller is responsible for saving state to disk.
+    """
+    pipeline_dir = Path(pipeline_dir)
+
+    for mesh_item in state.meshes:
+        if mesh_item.status != MeshStatus.TEXTURE_DONE:
+            continue
+        if not mesh_item.textured_mesh_path:
+            continue
+
+        mesh_item.status = MeshStatus.CLEANING_UP
+
+        sub_dir = pipeline_dir / mesh_item.sub_name / "meshes"
+        cleaned_path = sub_dir / "cleaned_mesh.glb"
+
+        worker.cleanup_mesh(
+            mesh_path=Path(mesh_item.textured_mesh_path),
+            output_path=cleaned_path,
+            symmetrize=state.symmetrize,
+            symmetry_axis=state.symmetry_axis.value,
+        )
+
+        # Point future steps at the cleaned mesh
+        mesh_item.textured_mesh_path = str(cleaned_path)
+        mesh_item.status = MeshStatus.CLEANUP_DONE
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +130,10 @@ def run_screenshots(
     cfg: Config = _default_config,
 ) -> None:
     """
-    Take screenshots for every mesh in TEXTURE_DONE status.
+    Take screenshots for every mesh in CLEANUP_DONE status.
+
+    Falls back to TEXTURE_DONE when the cleanup step was skipped (e.g. tests
+    that bypass the cleanup task).
 
     For each such mesh:
       1. Render 6 turntable views via `worker`.
@@ -88,9 +145,10 @@ def run_screenshots(
     Updates state in place.  Caller is responsible for saving state to disk.
     """
     pipeline_dir = Path(pipeline_dir)
+    _ready = {MeshStatus.CLEANUP_DONE, MeshStatus.TEXTURE_DONE}
 
     for mesh_item in state.meshes:
-        if mesh_item.status != MeshStatus.TEXTURE_DONE:
+        if mesh_item.status not in _ready:
             continue
 
         sub_dir = pipeline_dir / mesh_item.sub_name

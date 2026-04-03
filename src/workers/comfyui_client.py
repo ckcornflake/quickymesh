@@ -138,8 +138,12 @@ class ComfyUIClient:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            _raise_connection_error(exc, self.base_url)
+            raise  # unreachable — satisfies type checkers
 
         server_name = result.get("name", image_path.name)
         log.info(f"Uploaded {image_path.name} → server name: {server_name}")
@@ -151,8 +155,12 @@ class ComfyUIClient:
 
     def _get(self, path: str, timeout: float = 30.0) -> dict:
         url = f"{self.base_url}{path}"
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            _raise_connection_error(exc, self.base_url)
+            raise  # unreachable — satisfies type checkers
 
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self.base_url}{path}"
@@ -166,3 +174,28 @@ class ComfyUIClient:
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"ComfyUI HTTP {e.code} at {path}: {body}") from None
+        except urllib.error.URLError as exc:
+            _raise_connection_error(exc, self.base_url)
+            raise  # unreachable — satisfies type checkers
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _raise_connection_error(exc: urllib.error.URLError, base_url: str) -> None:
+    """
+    If *exc* wraps a connection-refused / network-unreachable error, raise a
+    friendlier RuntimeError in its place.  Otherwise do nothing (let the
+    caller re-raise the original).
+    """
+    reason = exc.reason
+    if isinstance(reason, OSError) and reason.errno in (
+        61,      # ECONNREFUSED (macOS/BSD)
+        111,     # ECONNREFUSED (Linux)
+        10061,   # WSAECONNREFUSED (Windows)
+    ):
+        raise RuntimeError(
+            f"Cannot connect to ComfyUI at {base_url} — is it running?"
+        ) from None

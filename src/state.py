@@ -54,6 +54,8 @@ class MeshStatus(str, Enum):
     MESH_DONE = "mesh_done"
     GENERATING_TEXTURE = "generating_texture"
     TEXTURE_DONE = "texture_done"
+    CLEANING_UP = "cleaning_up"
+    CLEANUP_DONE = "cleanup_done"
     SCREENSHOT_PENDING = "screenshot_pending"
     SCREENSHOT_DONE = "screenshot_done"
     AWAITING_APPROVAL = "awaiting_approval"
@@ -126,6 +128,10 @@ class PipelineState(BaseModel):
 
     concept_arts: list[ConceptArtItem] = Field(default_factory=list)
     meshes: list[MeshItem] = Field(default_factory=list)
+
+    # Set to True after showing the concept-art review sheet; reset to False
+    # whenever images change (regenerate / modify) so the sheet re-opens.
+    concept_art_sheet_shown: bool = False
 
     # Every prompt ever submitted for this pipeline (generation + modifications)
     all_prompts: list[str] = Field(default_factory=list)
