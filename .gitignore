@@ -146,6 +146,8 @@ users.yaml
 
 # Compiled CUDA wheels (platform-specific, rebuild with docker/build-wheels/)
 docker/comfyui-trellis/local_wheels/*.whl
+docker/input/
+docker/output/
 
 # Environments
 .env
