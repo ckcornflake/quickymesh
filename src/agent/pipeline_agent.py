@@ -160,7 +160,7 @@ class PipelineAgent:
         *,
         input_image_path: str | None = None,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
         concept_art_backend: str = "gemini",
     ) -> PipelineState:
         """

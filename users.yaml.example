@@ -1,0 +1,17 @@
+# quickymesh users configuration
+# Copy to users.yaml and fill in your API keys.
+#
+# Alternatively, set a single API_KEY environment variable for single-user mode.
+#
+# Roles:
+#   admin  — sees all pipelines, full access
+#   user   — sees only their own pipelines
+
+users:
+  alice:
+    api_key: "change-me-alice-secret-key"
+    role: admin
+
+  bob:
+    api_key: "change-me-bob-secret-key"
+    role: user

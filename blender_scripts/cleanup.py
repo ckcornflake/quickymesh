@@ -17,7 +17,7 @@ Run via BlenderScreenshotWorker.cleanup_mesh() (never call directly):
     blender --background --python blender_scripts/cleanup.py -- \\
         --input   textured_mesh.glb \\
         --output  cleaned_mesh.glb \\
-        [--symmetrize] [--symmetry_axis auto|x-|x+|y-|y+|z-|z+]
+        [--symmetrize] [--symmetry_axis x-|x+|y-|y+|z-|z+]
 
 Exit code 0 = success.
 """
@@ -45,8 +45,8 @@ def parse_args():
     parser.add_argument("--input",   required=True, help="Path to input .glb")
     parser.add_argument("--output",  required=True, help="Path to write cleaned .glb")
     parser.add_argument("--symmetrize",    action="store_true")
-    parser.add_argument("--symmetry_axis", default="auto",
-                        choices=["auto", "x-", "x+", "y-", "y+", "z-", "z+"])
+    parser.add_argument("--symmetry_axis", default="x-",
+                        choices=["x-", "x+", "y-", "y+", "z-", "z+"])
     return parser.parse_args(argv)
 
 
@@ -108,22 +108,10 @@ def apply_symmetrize(meshes: list, axis_spec: str) -> None:
     """
     Mirror the mesh across the specified axis to produce a symmetric result.
 
-    axis_spec:
-      "auto"  — symmetrize across the axis with the widest extent.
-      "x-"/"x+" — keep the negative/positive X half and mirror it.
-      (same for y and z)
+    axis_spec: "x-"/"x+" — keep the negative/positive X half and mirror it.
+               (same for y and z)
     """
-    if axis_spec == "auto":
-        extents = {"x": 0.0, "y": 0.0, "z": 0.0}
-        for obj in meshes:
-            d = obj.dimensions
-            extents["x"] = max(extents["x"], d.x)
-            extents["y"] = max(extents["y"], d.y)
-            extents["z"] = max(extents["z"], d.z)
-        largest = max(extents, key=extents.get)
-        direction = f"NEGATIVE_{largest.upper()}"
-    else:
-        direction = _DIR_MAP.get(axis_spec, "NEGATIVE_X")
+    direction = _DIR_MAP.get(axis_spec, "NEGATIVE_X")
 
     for obj in meshes:
         bpy.context.view_layer.objects.active = obj

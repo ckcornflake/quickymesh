@@ -64,7 +64,6 @@ class MeshStatus(str, Enum):
 
 
 class SymmetryAxis(str, Enum):
-    AUTO = "auto"
     X_MINUS = "x-"
     X_PLUS = "x+"
     Y_MINUS = "y-"
@@ -122,7 +121,7 @@ class PipelineState(BaseModel):
     # Per-pipeline mesh settings (can be updated any time before mesh gen)
     num_polys: int
     symmetrize: bool = False
-    symmetry_axis: SymmetryAxis = SymmetryAxis.AUTO
+    symmetry_axis: SymmetryAxis = SymmetryAxis.X_MINUS
 
     status: PipelineStatus = PipelineStatus.INITIALIZING
 

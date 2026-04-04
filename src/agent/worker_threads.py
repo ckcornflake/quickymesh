@@ -34,14 +34,24 @@ _POLL_INTERVAL = 1.0   # seconds between task-queue polls when idle
 
 
 def _notify_review_ready(pipeline_name: str, review_type: str) -> None:
-    """Print a prominent stdout notice so the user knows to press Enter."""
+    """Print a prominent stdout notice (for the standalone CLI) and publish an SSE event."""
     import sys
+    from src.api.event_bus import event_bus
+
     print(
         f"\n>>> Pipeline '{pipeline_name}' {review_type} review is ready — "
         "press Enter to review. <<<\n",
         flush=True,
         file=sys.stdout,
     )
+
+    status_key = "concept_art_review" if review_type == "concept art" else "mesh_review"
+    event_bus.publish({
+        "event": "status_change",
+        "pipeline": pipeline_name,
+        "status": status_key,
+        "message": f"Pipeline '{pipeline_name}' {review_type} review is ready.",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +292,13 @@ class ScreenshotWorkerThread(_BaseWorkerThread):
         elif task.task_type == "screenshot":
             run_screenshots(state, self._worker, pipeline_dir, self._cfg)
 
-            # Screenshots done — surface the mesh review prompt
+            # Advance all SCREENSHOT_DONE meshes to AWAITING_APPROVAL so the
+            # API/CLI can immediately present them for review without a
+            # separate transition step.
+            for m in state.meshes:
+                if m.status == MeshStatus.SCREENSHOT_DONE:
+                    m.status = MeshStatus.AWAITING_APPROVAL
+
             state.status = PipelineStatus.MESH_REVIEW
             state.save(state_path)
             log.info("Pipeline '%s' ready for mesh review", pipeline_name)

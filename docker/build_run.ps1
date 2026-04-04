@@ -1,4 +1,4 @@
-# build_run.ps1 — Build and manage the ComfyUI Docker container.
+# build_run.ps1 — Build and manage the ComfyUI Trellis Docker container.
 # Run from PowerShell terminal in VSCode.
 #
 # Usage:
@@ -11,38 +11,38 @@
 
 param([string]$Cmd = "all")
 
-$ComposeFile = "$PSScriptRoot\comfyui\docker-compose.yml"
+$ComposeFile = "$PSScriptRoot\docker-compose.yml"
+$Svc = "comfyui-trellis"
 
 switch ($Cmd) {
     "build" {
-        Write-Host "==> Building ComfyUI image (this will take a while on first run) ..."
-        docker compose -f $ComposeFile build
+        Write-Host "==> Building comfyui-trellis image (this will take a while on first run) ..."
+        docker compose -f $ComposeFile build $Svc
     }
     "start" {
-        Write-Host "==> Starting ComfyUI container on port 8189 ..."
-        docker compose -f $ComposeFile up -d
-        Write-Host "==> ComfyUI starting at http://localhost:8189"
+        Write-Host "==> Starting comfyui-trellis container ..."
+        docker compose -f $ComposeFile up -d $Svc
+        Write-Host "==> Trellis ComfyUI starting at http://localhost:8190"
         Write-Host "    Run '.\docker\build_run.ps1 logs' to watch startup progress."
     }
     "all" {
-        Write-Host "==> Building ComfyUI image ..."
-        docker compose -f $ComposeFile build
-        Write-Host "==> Starting ComfyUI container on port 8189 ..."
-        docker compose -f $ComposeFile up -d
+        Write-Host "==> Building comfyui-trellis image ..."
+        docker compose -f $ComposeFile build $Svc
+        Write-Host "==> Starting comfyui-trellis container ..."
+        docker compose -f $ComposeFile up -d $Svc
         Write-Host ""
-        Write-Host "==> ComfyUI is starting at http://localhost:8189"
+        Write-Host "==> Trellis ComfyUI is starting at http://localhost:8190"
         Write-Host "    Run '.\docker\build_run.ps1 logs' to watch startup progress."
-        Write-Host "    Run 'python docker\test_comfyui.py' to submit a test workflow."
     }
     "stop" {
-        Write-Host "==> Stopping ComfyUI container ..."
-        docker compose -f $ComposeFile down
+        Write-Host "==> Stopping comfyui-trellis container ..."
+        docker compose -f $ComposeFile down $Svc
     }
     "logs" {
-        docker compose -f $ComposeFile logs -f
+        docker compose -f $ComposeFile logs -f $Svc
     }
     "shell" {
-        docker exec -it comfyui bash
+        docker exec -it comfyui-trellis bash
     }
     default {
         Write-Host "Unknown command: $Cmd"

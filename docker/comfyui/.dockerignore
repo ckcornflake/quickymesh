@@ -1,4 +1,0 @@
-# Don't copy anything from the build context into the image —
-# ComfyUI is cloned fresh from GitHub in the Dockerfile.
-# Models are mounted as volumes at runtime.
-**

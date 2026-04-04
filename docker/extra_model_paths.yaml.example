@@ -1,0 +1,25 @@
+# extra_model_paths.yaml — ComfyUI central model path config.
+#
+# Copy this file to the ROOT of each local ComfyUI install (not this repo).
+# Rename it to: extra_model_paths.yaml
+#
+# This lets multiple ComfyUI instances share one central models folder,
+# avoiding duplicate copies of large files.
+#
+# Paths can use forward slashes on Windows.
+
+central_models:
+    base_path: C:/Users/YOUR_USERNAME/AI_Models/
+    checkpoints: checkpoints/
+    vae: vae/
+    loras: loras/
+    clip: clip/
+    clip_vision: clip_vision/
+    controlnet: controlnet/
+    upscale_models: upscale_models/
+    embeddings: embeddings/
+    diffusion_models: diffusion_models/
+    text_encoders: text_encoders/
+    # Trellis-specific model dirs
+    microsoft: microsoft/
+    facebook: facebook/

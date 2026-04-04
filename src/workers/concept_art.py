@@ -60,6 +60,7 @@ class ConceptArtWorker(ABC):
         """
 
 
+
 # ---------------------------------------------------------------------------
 # Gemini implementation
 # ---------------------------------------------------------------------------
@@ -220,8 +221,8 @@ class FluxComfyUIConceptArtWorker(ConceptArtWorker):
             if self._arbiter else nullcontext()
         )
         with ctx:
+            self._client.free_memory()  # evict any previously loaded model (e.g. Trellis)
             history = self._client.run_workflow_and_get_history(workflow)
-            self._client.free_memory()
         return _extract_comfyui_image(history, self._client)
 
     def modify_image(self, image_bytes: bytes, instruction: str) -> bytes:

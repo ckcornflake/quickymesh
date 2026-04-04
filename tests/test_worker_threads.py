@@ -424,9 +424,11 @@ class TestScreenshotWorkerThread:
         stop_event.set()
         t.join(timeout=3)
 
+        # Worker advances SCREENSHOT_DONE → AWAITING_APPROVAL so the review
+        # API/CLI sees meshes immediately without an extra transition step.
         state = PipelineState.load(pipeline_state_path)
         for m in state.meshes:
-            assert m.status == MeshStatus.SCREENSHOT_DONE
+            assert m.status == MeshStatus.AWAITING_APPROVAL
 
     def test_screenshot_failure_marks_task_failed(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
         self._make_state_texture_done(pipeline_state_path, cfg)

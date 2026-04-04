@@ -1,0 +1,117 @@
+{
+  "_comment": [
+    "ControlNet Canny Restyle workflow — ComfyUI API (prompt) format.",
+    "Converted from the LiteGraph GUI export provided by the user.",
+    "Uses Juggernaut-XL + ControlNet Canny to restyle an existing image",
+    "while preserving its silhouette/shape.",
+    "Sentinel values replaced at runtime by _inject_restyle_params():",
+    "  Node 2  image            → uploaded server-side filename",
+    "  Node 3  text             → positive style prompt (__POSITIVE__)",
+    "  Node 4  text             → negative prompt (__NEGATIVE__)",
+    "  Node 20 seed             → random integer",
+    "  Node 20 denoise          → user-supplied denoise strength",
+    "  Node 32 filename_prefix  → per-job unique ID (__JOB_ID__)"
+  ],
+
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__INPUT_IMAGE__"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "__POSITIVE__"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "__NEGATIVE__"
+    }
+  },
+  "5": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["2", 0],
+      "upscale_method": "bilinear",
+      "width": 1024,
+      "height": 1024,
+      "crop": "center"
+    }
+  },
+  "6": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["5", 0],
+      "vae": ["1", 2]
+    }
+  },
+  "10": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "controlnet-canny-sdxl-1.0.safetensors"
+    }
+  },
+  "11": {
+    "class_type": "CannyEdgePreprocessor",
+    "inputs": {
+      "image": ["5", 0],
+      "low_threshold": 50,
+      "high_threshold": 200,
+      "resolution": 512
+    }
+  },
+  "12": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "control_net": ["10", 0],
+      "image": ["11", 0],
+      "vae": ["1", 2],
+      "strength": 0.45,
+      "start_percent": 0,
+      "end_percent": 0.9
+    }
+  },
+  "20": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "positive": ["12", 0],
+      "negative": ["12", 1],
+      "latent_image": ["6", 0],
+      "seed": 0,
+      "control_after_generate": "fixed",
+      "steps": 30,
+      "cfg": 7.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.75
+    }
+  },
+  "30": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["20", 0],
+      "vae": ["1", 2]
+    }
+  },
+  "32": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["30", 0],
+      "filename_prefix": "__JOB_ID__"
+    }
+  }
+}

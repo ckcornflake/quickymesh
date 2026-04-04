@@ -1,35 +1,7 @@
 services:
 
   # -----------------------------------------------------------------------
-  # ComfyUI SDXL — Juggernaut-XL concept art generation
-  # Port 8189 | Python 3.11 | PyTorch 2.10.0+cu128
-  # -----------------------------------------------------------------------
-  comfyui-sdxl:
-    build:
-      context: ./comfyui
-      dockerfile: Dockerfile
-    image: comfyui-sdxl:latest
-    container_name: comfyui-sdxl
-    ports:
-      - "8189:8189"
-    volumes:
-      - ${SDXL_MODELS_DIR:-./models/sdxl}:/app/models
-      - ${SDXL_OUTPUT_DIR:-./output/sdxl}:/app/output
-      - ${SDXL_INPUT_DIR:-./input/sdxl}:/app/input
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    restart: unless-stopped
-
-  # -----------------------------------------------------------------------
-  # ComfyUI Trellis2 — Image-to-3D mesh generation
+  # ComfyUI Trellis2 — all AI workflows (FLUX, ControlNet restyle, Trellis)
   # Port 8190 | Python 3.12 | PyTorch 2.8.0+cu128
   # -----------------------------------------------------------------------
   comfyui-trellis:
@@ -55,8 +27,10 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/home/comfy/.cache/huggingface
+      - HF_HUB_CACHE=/home/comfy/.cache/huggingface/hub
     restart: unless-stopped
 
 volumes:
-  # Persists HuggingFace model cache (BiRefNet etc.) across container restarts
+  # Persists HuggingFace model cache (Trellis, DINOv2, BiRefNet etc.) across container restarts
   trellis-hf-cache:

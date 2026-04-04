@@ -79,7 +79,7 @@ def configure_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     log_path = log_dir / log_filename
-    file_handler = logging.handlers.TimedRotatingFileHandler(
+    file_handler = _WindowsSafeTimedRotatingFileHandler(
         log_path,
         when="midnight",
         backupCount=7,
@@ -98,6 +98,22 @@ def configure_logging(
     logging.getLogger(__name__).info(
         "Logging initialised — file: %s, level: %s", log_path, level_name
     )
+
+
+class _WindowsSafeTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """
+    TimedRotatingFileHandler that survives Windows rename failures.
+
+    On Windows, rotating a log file that another process still has open raises
+    PermissionError.  Rather than crashing, we skip the rename and keep writing
+    to the current file.
+    """
+
+    def rotate(self, source: str, dest: str) -> None:
+        try:
+            super().rotate(source, dest)
+        except PermissionError:
+            pass  # Another process holds the file — skip rotation, keep writing
 
 
 class _JsonFormatter(logging.Formatter):

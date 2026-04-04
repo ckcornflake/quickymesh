@@ -1,0 +1,77 @@
+{
+  "_comment": [
+    "FLUX.1-dev FP8 concept art generation workflow — ComfyUI API (prompt) format.",
+    "Converted from the LiteGraph GUI export provided by the user.",
+    "Sentinel values replaced at runtime by _inject_flux_params():",
+    "  Node 6  text            → prompt string",
+    "  Node 27 width / height  → concept_art_image_size from config",
+    "  Node 31 seed            → random integer",
+    "  Node 9  filename_prefix → per-job unique ID"
+  ],
+
+  "30": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "flux1-dev-fp8.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["30", 1],
+      "text": "__PROMPT__"
+    }
+  },
+  "33": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["30", 1],
+      "text": ""
+    }
+  },
+  "35": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "conditioning": ["6", 0],
+      "guidance": 3.5
+    }
+  },
+  "27": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "31": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["30", 0],
+      "positive": ["35", 0],
+      "negative": ["33", 0],
+      "latent_image": ["27", 0],
+      "seed": 0,
+      "control_after_generate": "fixed",
+      "steps": 20,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["31", 0],
+      "vae": ["30", 2]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["8", 0],
+      "filename_prefix": "__JOB_ID__"
+    }
+  }
+}

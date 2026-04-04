@@ -44,6 +44,7 @@ USER comfy
 WORKDIR /app
 
 # --- PyTorch ---
+RUN pip uninstall torch torchvision torchaudio
 RUN pip install --upgrade pip && \
     pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
         --index-url https://download.pytorch.org/whl/cu128
@@ -66,7 +67,7 @@ RUN pip install \
     easydict \
     opencv-python-headless \
     trimesh \
-    transformers \
+    "transformers==4.57.1" \
     zstandard \
     kornia \
     timm \
@@ -89,19 +90,37 @@ RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git . && \
 
 # --- ComfyUI-Trellis2 custom node ---
 # git-lfs is installed above so the wheels/ directory (cumesh, o_voxel etc.) is fetched too.
-RUN git clone --depth 1 https://github.com/visualbruno/ComfyUI-Trellis2.git \
-        custom_nodes/ComfyUI-Trellis2
+RUN git clone https://github.com/visualbruno/ComfyUI-Trellis2.git \
+        custom_nodes/ComfyUI-Trellis2 && \
+    git -C custom_nodes/ComfyUI-Trellis2 checkout ef2286b47ce0ef0e681dffe0209aadd96de50f72
 
-# --- Install wheels from visualbruno's repo (updated APIs required by latest node code) ---
-# Torch270 Linux wheels — ABI-compatible with our Torch 2.8.0.
-# cumesh 1.0: adds remove_inner_faces to remesh_narrow_band_dc (Trellis2Remesh)
-# o_voxel 0.0.1: adds tiled_flexible_dual_grid_to_mesh (shape decoder)
-ENV VB_WHEELS=custom_nodes/ComfyUI-Trellis2/wheels/Linux/Torch270
-RUN pip install --no-cache-dir ${VB_WHEELS}/cumesh-1.0-cp312-cp312-linux_x86_64.whl
-RUN pip install --no-cache-dir ${VB_WHEELS}/flex_gemm-0.0.1-cp312-cp312-linux_x86_64.whl
-# nvdiffrast: use camenduru wheel (Torch270 version has ABI incompatibility with Torch 2.8.0)
-RUN pip install --no-cache-dir ${WHEELS}/nvdiffrast-0.4.0-cp312-cp312-linux_x86_64.whl
-RUN pip install --no-cache-dir --no-deps ${VB_WHEELS}/o_voxel-0.0.1-cp312-cp312-linux_x86_64.whl
+# --- Install ControlNet Auxiliary Preprocessors ---
+RUN git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git \
+    /app/custom_nodes/comfyui_controlnet_aux
+
+# Install requirements
+RUN pip install --no-cache-dir -r /app/custom_nodes/comfyui_controlnet_aux/requirements.txt
+
+# Ensure ONNX Runtime GPU for your GPU
+RUN pip install onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+
+# --- Install YOUR custom-built Torch 2.8.0 wheels ---
+# Create a temporary directory for the wheels
+RUN mkdir -p /tmp/local_wheels
+COPY local_wheels/*.whl /tmp/local_wheels/
+
+# Install them in order
+# These now contain the remove_inner_faces and tiled_flexible_dual_grid_to_mesh APIs
+RUN pip install --no-cache-dir /tmp/local_wheels/cumesh-*.whl
+RUN pip install --no-cache-dir /tmp/local_wheels/flex_gemm-*.whl
+RUN pip install --no-cache-dir /tmp/local_wheels/nvdiffrast-*.whl
+RUN pip install --no-cache-dir --no-deps /tmp/local_wheels/o_voxel-*.whl
+
+# From https://www.youtube.com/watch?v=OkK-BfLiS2Q
+RUN pip install xformers==v0.0.32.post1
+
+# Clean up temporary files
+RUN rm -rf /tmp/local_wheels
 
 # --- Pre-download rembg u2net model (used by Trellis2PreProcessImage remove_background) ---
 # Without this it downloads from GitHub at runtime and times out.
@@ -115,12 +134,7 @@ from transformers import AutoModelForImageSegmentation; \
 AutoModelForImageSegmentation.from_pretrained('ZhengPeng7/BiRefNet', trust_remote_code=True)"
 
 # Create placeholder dirs so ComfyUI starts cleanly even without volume mounts
-RUN mkdir -p \
-    models/checkpoints \
-    models/microsoft \
-    models/facebook \
-    output \
-    input
+RUN mkdir -p models output input
 
 EXPOSE 8190
 

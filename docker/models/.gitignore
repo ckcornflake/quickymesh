@@ -1,0 +1,19 @@
+# Ignore model weight files — these are downloaded via download_models.sh
+# Directory structure (and .gitkeep files) are tracked so the folders exist after clone.
+
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+*.pkl
+
+# HuggingFace repo metadata that gets created on download
+*.json
+*.yaml
+*.txt
+*.md
+*.py
+!.gitkeep

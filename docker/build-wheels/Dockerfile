@@ -20,10 +20,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 ENV CUDA_HOME=/usr/local/cuda
-# Target SM 8.6 (RTX 3090), 8.9 (RTX 4090), 9.0 (H100)
-# sm_120 (RTX 5090/Blackwell) excluded — o-voxel rasterizer is incompatible.
+# Default arch list includes SM 12.0 (RTX 5090/Blackwell).
+# o_voxel overrides this to exclude SM 12.0 — its rasterizer is incompatible.
 # Required during docker build where no GPU is visible to auto-detect.
-ENV TORCH_CUDA_ARCH_LIST="8.6;8.9;9.0"
+ENV TORCH_CUDA_ARCH_LIST="8.6;8.9;9.0;12.0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
@@ -71,6 +71,7 @@ RUN git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git && \
 
 # --- o_voxel (from visualbruno's TRELLIS.2 fork — includes tiled_flexible_dual_grid_to_mesh) ---
 # o-voxel also has a third_party/eigen submodule that shallow clone leaves empty.
+# SM 12.0 excluded here — o_voxel rasterizer is incompatible with Blackwell.
 RUN git clone --depth 1 https://github.com/visualbruno/TRELLIS.2.git && \
     mkdir -p TRELLIS.2/o-voxel/third_party && \
     rm -rf TRELLIS.2/o-voxel/third_party/eigen && \

@@ -155,11 +155,13 @@ class ComfyUIClient:
 
     def upload_image(self, image_path: Path | str) -> str:
         """
-        Upload a local image to ComfyUI's input directory.
+        Upload a local file to ComfyUI's input directory.
         Returns the server-side filename (used in workflow node inputs).
+        Works for images (PNG, JPEG) and meshes (GLB, OBJ).
         """
         image_path = Path(image_path)
-        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        _MIME_OVERRIDES = {".glb": "model/gltf-binary", ".obj": "model/obj"}
+        mime = _MIME_OVERRIDES.get(image_path.suffix.lower()) or mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
         boundary = uuid.uuid4().hex
 
         with open(image_path, "rb") as f:

@@ -137,6 +137,16 @@ celerybeat.pid
 # Pipeline output (local only)
 pipeline_root/
 
+# Logs
+logs/
+coverage_phase1.json
+
+# Local config (contains real API keys)
+users.yaml
+
+# Compiled CUDA wheels (platform-specific, rebuild with docker/build-wheels/)
+docker/comfyui-trellis/local_wheels/*.whl
+
 # Environments
 .env
 .envrc

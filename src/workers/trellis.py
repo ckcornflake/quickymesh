@@ -133,6 +133,7 @@ class ComfyUITrellisWorker(TrellisWorker):
                 filename_prefix=job_id,
             )
 
+            self._client.free_memory()  # evict any previously loaded model (e.g. FLUX)
             started_at = time.time()
             self._client.run_workflow(workflow)
 
@@ -165,14 +166,16 @@ class ComfyUITrellisWorker(TrellisWorker):
             log.info(f"[texture_mesh] attempt {attempt}/{MAX_RETRIES}, seed={seed}, job={job_id}")
 
             server_image = self._client.upload_image(image_path)
+            server_glb = self._client.upload_image(mesh_path)
             workflow = _inject_texture_params(
                 self._base_texture,
                 image_name=server_image,
-                glb_path=str(Path(mesh_path).resolve()),
+                glb_path=server_glb,
                 seed=seed,
                 filename_prefix=f"{job_id}_tex",
             )
 
+            self._client.free_memory()  # evict any previously loaded model (e.g. FLUX)
             started_at = time.time()
             self._client.run_workflow(workflow)
 

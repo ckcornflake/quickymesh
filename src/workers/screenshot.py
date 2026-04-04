@@ -38,7 +38,7 @@ class ScreenshotWorker(ABC):
         mesh_path: Path,
         output_path: Path,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
     ) -> Path:
         """
         Apply shade-smooth and optional symmetrize to `mesh_path`, write the
@@ -55,7 +55,7 @@ class ScreenshotWorker(ABC):
         views: list[str] | None = None,
         resolution: int = 1024,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
     ) -> list[Path]:
         """
         Render turntable screenshots of `mesh_path` into `output_dir`.
@@ -96,7 +96,7 @@ class BlenderScreenshotWorker(ScreenshotWorker):
         mesh_path: Path,
         output_path: Path,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
     ) -> Path:
         cleanup_script = (
             Path(__file__).parent.parent.parent / self._CLEANUP_SCRIPT_REL
@@ -141,7 +141,7 @@ class BlenderScreenshotWorker(ScreenshotWorker):
         views: list[str] | None = None,
         resolution: int = 1024,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
     ) -> list[Path]:
         views = views or DEFAULT_VIEWS
         output_dir = Path(output_dir)
@@ -221,7 +221,7 @@ class MockScreenshotWorker(ScreenshotWorker):
         mesh_path: Path,
         output_path: Path,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
     ) -> Path:
         if self._fail:
             raise RuntimeError("MockScreenshotWorker: simulated cleanup failure")
@@ -247,7 +247,7 @@ class MockScreenshotWorker(ScreenshotWorker):
         views: list[str] | None = None,
         resolution: int = 1024,
         symmetrize: bool = False,
-        symmetry_axis: str = "auto",
+        symmetry_axis: str = "x-",
     ) -> list[Path]:
         if self._fail:
             raise RuntimeError("MockScreenshotWorker: simulated Blender failure")

@@ -414,18 +414,18 @@ def _start_new_pipeline(agent, ui) -> None:
     num_polys = int(polys_str) if polys_str.isdigit() else None
 
     # ── Symmetry ───────────────────────────────────────────────────────────
-    _SYM_OPTIONS = ["auto", "x-", "x+", "y-", "y+", "z-", "z+"]
+    _SYM_OPTIONS = ["x-", "x+", "y-", "y+", "z-", "z+"]
     sym_raw = ui.ask(
         "Symmetrize mesh after generation?\n"
         f"  Options: {', '.join(_SYM_OPTIONS)}\n"
-        "  Enter an axis to enable (default: auto), or leave blank to skip:"
+        "  Enter an axis to enable (default: x-), or leave blank to skip:"
     ).strip().lower()
     if sym_raw in _SYM_OPTIONS:
         symmetrize, symmetry_axis = True, sym_raw
     elif not sym_raw:
-        symmetrize, symmetry_axis = True, "auto"   # bare Enter → auto
+        symmetrize, symmetry_axis = True, "x-"   # bare Enter → x-
     else:
-        symmetrize, symmetry_axis = False, "auto"  # anything else → off
+        symmetrize, symmetry_axis = False, "x-"  # anything else → off
 
     agent.start_pipeline(
         name, description, num_polys,
