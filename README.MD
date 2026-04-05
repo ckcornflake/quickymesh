@@ -1,104 +1,208 @@
 # quickymesh
 
-A parallel 3-D asset pipeline: Gemini Flash → Trellis (ComfyUI) → Blender → game-ready `.glb`.
+Generate game-ready 3-D assets from a text description — or an existing image — using a local AI pipeline.
 
-Multiple pipelines run concurrently. Background worker threads handle GPU work while the CLI surfaces approvals only when the user is needed.
-
----
-
-## Prerequisites
-
-| Tool | Version / Notes |
-|------|----------------|
-| Python | **3.14** (packages installed here; 3.13 is on PATH but has no packages) |
-| ComfyUI (portable, NVIDIA) | Running on port 8188 with Trellis workflows loaded |
-| Blender | 4.5, at `C:/Program Files/Blender Foundation/Blender 4.5/blender.exe` |
-| Gemini API key | Set in `.env` as `GEMINI_API_KEY=...` |
-
-Install Python deps (run once from repo root):
-
-```
-/c/Users/jmkel/AppData/Local/Programs/Python/Python314/python.exe -m pip install -r requirements.txt
-```
+**Current state:** Phase 1 complete. The pipeline runs as a REST API server backed by worker threads. A CLI client (`qm_cli.py`) provides the full user experience over HTTP. A Dockerized ComfyUI+Trellis container handles all GPU-intensive generation. Blender handles screenshots and mesh cleanup on the host.
 
 ---
 
-## Configuration
+## What it does
 
-All defaults live in `defaults.yaml`. Key settings:
+1. You describe a 3-D object (or point to an existing image).
+2. Gemini Flash 2.5 (or FLUX.1-dev locally) generates several concept art images.
+3. You approve the ones you like.
+4. Trellis (running in Docker via ComfyUI) turns each approved image into a textured 3-D mesh.
+5. Blender renders screenshots from 6 angles and generates an interactive HTML preview.
+6. You approve or reject each mesh, then export the winners as `.glb` (or `.obj`).
 
-| Key | Default | Env override |
-|-----|---------|-------------|
-| `gemini.model` | `gemini-2.5-flash-image` | `GEMINI_MODEL` |
-| `generation.num_concept_arts` | `4` | `NUM_CONCEPT_ARTS` |
-| `generation.num_polys` | `8000` | `NUM_POLYS` |
-| `output.root` | `pipeline_root/` | `OUTPUT_ROOT` |
-| `infrastructure.comfyui_url` | `http://localhost:8188` | `COMFYUI_URL` |
-| `infrastructure.blender_path` | (see above) | `BLENDER_PATH` |
-
-Secrets go in `.env` (gitignored):
-
-```
-GEMINI_API_KEY=your_key_here
-```
+Multiple pipelines run concurrently. Background worker threads handle GPU work so you're never waiting idle.
 
 ---
 
-## Running the pipeline
+## System requirements
+
+| Component | Requirement |
+|---|---|
+| OS | Windows 10/11 or Linux. macOS not supported (CUDA required). |
+| Python | **3.12+** (for the server and CLI) |
+| NVIDIA GPU | **8 GB+ VRAM** for FLUX / restyle; **16 GB+ VRAM** for Trellis. RTX 3000 series or newer recommended. |
+| NVIDIA driver | **550+** (CUDA 12.x) |
+| Docker | Docker Desktop (Windows) or Docker Engine (Linux) with GPU passthrough |
+| WSL 2 | Required on Windows for Docker with NVIDIA GPU support |
+| Blender | **4.x**, installed on the host (not in Docker). Default path: `C:/Program Files/Blender Foundation/Blender 4.5/blender.exe` |
+| Disk | **~50 GB** free for Docker images + model weights |
+
+**Windows users:** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and enable the WSL 2 backend. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU passthrough inside Docker.
+
+---
+
+## Concept art backends
+
+Two backends are available for concept art generation:
+
+| | Gemini Flash 2.5 | FLUX.1-dev (local) |
+|---|---|---|
+| **Runs on** | Google Cloud API | Local GPU (Docker) |
+| **Models to download** | None | ~8 GB (`flux1-dev-fp8.safetensors`) |
+| **VRAM required** | 0 (cloud) | ~16 GB |
+| **Speed** | ~10–30 s per image | ~30–90 s per image |
+| **Cost** | ~$0.01–0.05 per image | Free (electricity) |
+| **Image quality** | Excellent — follows prompts precisely | Very good |
+| **Image modification** | Yes (`modify` command) | No |
+| **Use existing image as base** | Yes | No |
+| **API key required** | Yes | No |
+
+**To get a Gemini API key:** Visit [aistudio.google.com](https://aistudio.google.com/), sign in, go to API keys, and go to "Create API key". Image generation costs a small amount per request, but may provide a small number of initial images free — see [Google AI pricing](https://ai.google.dev/pricing).
+
+---
+
+## Installation
+
+### 1. Clone the repo
 
 ```bash
-/c/Users/jmkel/AppData/Local/Programs/Python/Python314/python.exe main.py
+git clone https://github.com/ckcornflake/quickymesh
+cd quickymesh
 ```
 
-### CLI idle menu
+### 2. Install Python dependencies (for the CLI only)
 
-When no pipeline needs your attention:
-s
-```
---- quickymesh ---
-[n] Start a new pipeline
-[s] Status (workers + pipelines)
-[q] Quit
+```bash
+pip install -r requirements.txt
 ```
 
-`[s]` shows which worker threads are alive and the current status of every pipeline — use it to check progress without waiting for a review prompt.
+The server, Blender, and ComfyUI all run inside Docker — nothing else is needed on the host.
 
-### Starting a new pipeline
+---
 
-Choose `[n]`. You will be asked:
-1. **Pipeline name** — a short identifier with no spaces (e.g. `red_dragon`)
-2. **Description** — plain English (e.g. `a red dragon breathing fire`). The suffix `plain white background` is automatically appended so Trellis background removal works.
-3. **Polygon count** — press Enter to use the default (8000).
+## Docker setup
 
-Concept art generation queues immediately and runs in the background.
+The Docker container is the complete runtime — ComfyUI, the quickymesh API server, and Blender all run inside one image. Nothing else needs to be installed on the host beyond Python for `qm_cli.py`.  
 
-### Concept art review
+> **Time warning:** The first build downloads and compiles CUDA extensions. Expect **20–45 minutes**. Subsequent builds use the cache and finish in seconds.
 
-When images are ready the CLI interrupts the idle menu automatically:
+### Step 1 — Configure
 
-```
-Actions:
-  approve <indices>  — e.g. 'approve 1 3' to send to mesh gen
-  regenerate <idx>   — e.g. 'regenerate 2 4'
-  modify <idx>       — modify one image via Gemini
-  cancel             — cancel this pipeline
-  quit               — exit the program
+```bash
+cp docker/.env.example docker/.env
 ```
 
-Indices are **1-based** and match the labels on the review sheet PNG. Approving immediately queues mesh generation — you will be told.
-
-### Mesh review
-
-Once mesh + texturing + screenshots are done the CLI surfaces the mesh review. You can:
+Edit `docker/.env` and fill in at minimum:
 
 ```
-approve <sub_name> [format]  — e.g. 'approve red_dragon_1' or 'approve red_dragon_1 obj'
-reject                       — send mesh back (pipeline stays alive)
-cancel                       — cancel pipeline entirely
-quit
+API_KEY=your-secret-api-key         # any string — used by the CLI to authenticate
+GEMINI_API_KEY=your_gemini_key      # only needed for the Gemini concept art backend
+TRELLIS_MODELS_DIR=/path/to/models  # optional: reuse an existing AI_Models folder
 ```
 
-Approved meshes are exported to `pipeline_root/final_game_ready_assets/`.
+### Step 2 — Build the image
+
+From the repo root:
+
+```powershell
+# PowerShell (Windows)
+.\docker\build_run.ps1 build
+```
+
+```bash
+# Bash / WSL / Linux
+bash docker/build_run.sh build
+```
+
+### Step 3 — Download model weights
+
+Models are not bundled in the image (~40 GB total). Run once:
+
+```bash
+# Download everything (FLUX + restyle + Trellis)
+bash docker/download_models.sh
+
+# Or selectively:
+bash docker/download_models.sh flux      # FLUX.1-dev FP8 (~8 GB)
+bash docker/download_models.sh restyle   # ControlNet Canny + Juggernaut-XL (~8 GB)
+bash docker/download_models.sh trellis   # Trellis2 + DINOv2 (~25 GB)
+```
+
+> **FLUX.1-dev** requires accepting the license at [huggingface.co/black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) and logging in with `huggingface-cli login` first.
+
+> **Trellis weights** also download automatically on first container start. Skip `download_models.sh trellis` if you prefer that or have an existing local copy.
+
+### Step 4 — Start the container
+
+```powershell
+.\docker\build_run.ps1 start
+```
+
+```bash
+bash docker/build_run.sh start
+```
+
+Once running:
+
+| Service | URL |
+|---|---|
+| quickymesh API | `http://localhost:8000` |
+| API docs (Swagger) | `http://localhost:8000/docs` |
+| ComfyUI (for debugging) | `http://localhost:8190` |
+
+Watch startup logs with:
+
+```bash
+.\docker\build_run.ps1 logs
+bash docker/build_run.sh logs
+```
+
+> **First start:** Trellis model weights download on first startup if not already present — can take **10–30 minutes**.
+
+---
+
+## Using the CLI
+
+```bash
+python qm_cli.py
+```
+
+Connects to `http://localhost:8000` by default. To connect elsewhere:
+
+```bash
+python qm_cli.py --server http://10.0.0.5:8000 --key your-api-key
+```
+
+**Save defaults in `~/.qm_config`** (JSON) so you don't need flags every time:
+
+```json
+{
+  "server": "http://localhost:8000",
+  "api_key": "your-secret-api-key-here"
+}
+```
+
+Or set environment variables:
+
+```bash
+export QM_SERVER=http://localhost:8000
+export QM_API_KEY=your-secret-api-key-here
+```
+
+See [CLI_MANUAL.md](CLI_MANUAL.md) for a full walkthrough of all commands and flows.
+
+---
+
+## Configuration reference
+
+All defaults live in `defaults.yaml`. Key settings and their environment overrides:
+
+| Setting | Default | Env variable |
+|---|---|---|
+| `infrastructure.comfyui_url` | `http://localhost:8190` | `COMFYUI_URL` |
+| `infrastructure.blender_path` | `C:/Program Files/.../blender.exe` | `BLENDER_PATH` |
+| `infrastructure.comfyui_output_dir` | _(required for Docker)_ | `COMFYUI_OUTPUT_DIR` |
+| `generation.num_concept_arts` | `4` | `NUM_CONCEPT_ARTS` |
+| `generation.num_polys` | `8000` | `NUM_POLYS` |
+| `gemini.model` | `gemini-2.5-flash-preview-04-17` | `GEMINI_MODEL` |
+| `output.root` | `pipeline_root/` | `OUTPUT_ROOT` |
+
+When using the Docker container, set `COMFYUI_OUTPUT_DIR` in `.env` to the host path that is volume-mounted into the container as `/app/output`. This allows the Python server (running on the host) to read generated files.
 
 ---
 
@@ -106,100 +210,85 @@ Approved meshes are exported to `pipeline_root/final_game_ready_assets/`.
 
 ```
 pipeline_root/
-  tasks.db                         ← SQLite task queue (crash-safe)
+  tasks.db                               — SQLite task queue (crash-safe)
   uncompleted_pipelines/
     <name>/
-      state.json                   ← full pipeline state
-      concept_arts/                ← generated + padded PNGs
-      meshes/<name>_1/             ← per-approved-image
-        mesh.glb
-        textured.glb
-        screenshots/
-        review_<name>_1.png
-        preview.html               ← Three.js viewer
-  completed_pipelines/             ← moved here after final export
+      state.json                         — pipeline state (Pydantic)
+      concept_arts/                      — generated PNGs (1024×1024)
+      meshes/<name>_1/
+        mesh.glb                         — initial Trellis mesh
+        textured.glb                     — textured mesh
+        screenshots/                     — 6-angle Blender renders
+        review_<name>_1.png              — screenshot review sheet
+        preview.html                     — interactive Three.js viewer
+  completed_pipelines/                   — moved here after export
   final_game_ready_assets/
-    <final_name>/
-      <final_name>.glb
+    <asset_name>/
+      <asset_name>.glb                   — exported game-ready mesh
 ```
 
 ---
 
 ## Testing
 
-Run the full test suite (318 tests, all mocked — no real API or GPU needed):
+All 498 tests are fully mocked — no real API or GPU needed:
 
 ```bash
-/c/Users/jmkel/AppData/Local/Programs/Python/Python314/python.exe -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
-
-### Smoke testing individual phases
-
-Each smoke script exercises real external services. Run them in order to validate your environment before using the full pipeline.
-
-**Phase 2 — Gemini concept art**
-
-```bash
-/c/Users/jmkel/AppData/Local/Programs/Python/Python314/python.exe scripts/smoke_test_gemini.py
-```
-
-Saves a padded 1024×1024 PNG to `smoke_gemini/`. Open it to confirm the image looks right.
-
-**Phase 3 — Trellis mesh generation**
-
-> Requires ComfyUI running on port 8188 with Trellis nodes loaded.
-
-```bash
-/c/Users/jmkel/AppData/Local/Programs/Python/Python314/python.exe scripts/smoke_test_trellis.py \
-    --image path/to/concept_art.png \
-    --name my_test_mesh
-```
-
-Prints the path to the generated `.glb`. Inspect it in Blender or the HTML preview.
-
-**Phase 4 — Blender screenshots**
-
-> Requires Blender 4.5 installed.
-
-```bash
-/c/Users/jmkel/AppData/Local/Programs/Python/Python314/python.exe scripts/smoke_test_screenshots.py \
-    --mesh path/to/mesh.glb \
-    --hdri
-```
-
-Outputs 6 view PNGs, a review sheet, and `preview.html`. Open the HTML in a browser to confirm the 3-D viewer works.
-
-**Phase 5 — Full pipeline end-to-end**
-
-Start `main.py`, create a pipeline, let concept art generate (takes ~30 s), approve images, wait for mesh (~5–10 min in Trellis), approve the mesh. Check `pipeline_root/final_game_ready_assets/` for the exported `.glb`.
 
 ---
 
 ## Architecture overview
 
 ```
-main.py
-└── PipelineAgent
-    ├── ConceptArtWorkerThread   — polls broker for concept_art_generate / concept_art_modify
-    ├── TrellisWorkerThread      — polls broker for mesh_generate / mesh_texture  ┐ VRAM lock
-    └── ScreenshotWorkerThread   — polls broker for screenshot                    ┘ (one at a time)
+┌──────────────────────────────────────── Docker: quickymesh-runtime ──┐
+│                                                                        │
+│  startup.sh                                                            │
+│  ├── ComfyUI (:8190)          FLUX / ControlNet / Trellis workflows   │
+│  └── api_server.py (:8000)                                            │
+│      ├── FastAPI app          REST API, OpenAPI docs at /docs          │
+│      └── PipelineAgent                                                 │
+│          ├── ConceptArtWorkerThread   — Gemini or FLUX concept art     │
+│          ├── TrellisWorkerThread      — mesh generation + texturing  ┐ │
+│          └── ScreenshotWorkerThread   — Blender screenshots          ┘ │
+│                                       VRAM lock (one GPU task at once) │
+│  Blender 4.3.2 (headless)     screenshots, mesh cleanup, export        │
+│                                                                        │
+│  Volumes:                                                              │
+│    /app/models      — model weights (FLUX, Juggernaut, Trellis)        │
+│    /app/output      — ComfyUI output (images, meshes)                  │
+│    /quickymesh/pipeline_root  — pipeline state, assets                 │
+│    /quickymesh/logs           — API server logs                        │
+└────────────────────────────────────────────────────────────────────────┘
 
-Broker (SQLite tasks.db)         — crash-safe task queue shared by all threads
-VRAMArbiter (threading.Lock)     — prevents concurrent GPU-heavy tasks (OOM guard)
-PipelineState (state.json)       — Pydantic model; saved after every mutation
-PromptInterface                  — abstracted: CLIPromptInterface today, email/agent later
+         ▲ HTTP :8000
+         │
+┌────────┴──────────┐
+│   qm_cli.py       │  runs anywhere with network access (host, LAN, etc.)
+└───────────────────┘
+
+Broker (SQLite tasks.db)     — crash-safe task queue, survives process crashes
+VRAMArbiter (threading.Lock) — prevents concurrent GPU-heavy tasks (OOM guard)
+PipelineState (state.json)   — Pydantic model, saved to disk after every mutation
 ```
-
-**Priority order** when multiple pipelines are active:
-1. Concept art review (highest)
-2. Mesh review
-3. Idle menu (lowest)
 
 ---
 
-## Known issues / deferred
+## Further reading
 
-- **White-on-white background removal**: Trellis background removal only strips the padded border, not white areas that are part of the subject itself (e.g. a white teapot on a white background). Workaround: use a coloured subject or add `on a dark background` to your description override. Fix deferred post-phase-5.
-- **ComfyUI auto-start**: The doc specifies auto-starting ComfyUI if unreachable — not yet implemented. Start ComfyUI manually before running the pipeline.
-- **Email / agent prompt interface**: `PromptInterface` is abstract and ready; only `CLIPromptInterface` is implemented.
-- **Symmetrize on export**: DOC specifies optional mesh symmetrization at export time — not yet implemented.
+- [CLI_MANUAL.md](CLI_MANUAL.md) — full CLI user guide
+- [API.md](API.md) — HTTP API reference for building frontends or integrations
+- [ARCHITECTURE_PLAN.md](ARCHITECTURE_PLAN.md) — full design document and roadmap
+
+---
+
+## Roadmap
+
+| Phase | Status |
+|---|---|
+| 1 — FastAPI + CLI HTTP client | **Complete** |
+| 1.5 — Unified runtime Docker container (API + Blender + ComfyUI) | **Complete** |
+| 2 — Svelte web UI | Planned |
+| 3 — Local proxy server (Nginx + WireGuard) | Planned |
+| 4 — Public cloud deployment (quickymesh.ai) | Planned |

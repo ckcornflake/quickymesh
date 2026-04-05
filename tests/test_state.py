@@ -121,7 +121,7 @@ class TestPipelineStateCreation:
             name="n", description="d", num_polys=1000, pipeline_dir="p"
         )
         assert state.symmetrize is False
-        assert state.symmetry_axis == SymmetryAxis.AUTO
+        assert state.symmetry_axis == SymmetryAxis.X_MINUS
 
     def test_concept_arts_and_meshes_empty_by_default(self):
         state = PipelineState(

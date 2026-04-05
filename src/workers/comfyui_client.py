@@ -214,7 +214,8 @@ class ComfyUIClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read())
+                body = resp.read()
+                return json.loads(body) if body.strip() else {}
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"ComfyUI HTTP {e.code} at {path}: {body}") from None

@@ -1,8 +1,14 @@
-# ComfyUI + Trellis2 Docker Image
+# quickymesh runtime image
 #
-# Base: CUDA 12.8 runtime on Ubuntu 24.04 (Python 3.12 default — required for cp312 wheels)
-# All CUDA extensions installed as prebuilt wheels from camenduru/wheels (no compilation).
+# Contains:
+#   - ComfyUI + Trellis2 custom nodes  (port 8190)
+#   - quickymesh FastAPI server         (port 8000)
+#   - Blender 4.3.2                    (headless, for screenshots + mesh cleanup)
 #
+# Build context: repo root  (set in docker-compose.yml)
+# Dockerfile location: docker/comfyui-trellis/Dockerfile
+#
+# Base: CUDA 12.8 runtime on Ubuntu 24.04 (Python 3.12 — required for cp312 wheels)
 # Wheel sources: https://github.com/camenduru/wheels/releases/tag/trellis2
 
 FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
@@ -16,6 +22,7 @@ ENV PATH="/home/comfy/.local/bin:${PATH}"
 
 # System dependencies
 # build-essential + cmake needed by some pip packages (open3d, pymeshlab) at install time
+# libx11-6 + libxi6 + libxxf86vm1 etc. needed for Blender headless rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -27,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git-lfs \
     wget \
     curl \
+    xz-utils \
     ffmpeg \
     ca-certificates \
     libgl1 \
@@ -36,20 +44,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxrender1 \
     libxext6 \
+    libx11-6 \
+    libxi6 \
+    libxxf86vm1 \
+    libxfixes3 \
+    libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
+
+# ---- Blender 4.3.2 (headless) -----------------------------------------------
+# Installed as root into /opt/blender before switching to the comfy user.
+RUN wget -q -O /tmp/blender.tar.xz \
+        "https://download.blender.org/release/Blender4.3/blender-4.3.2-linux-x64.tar.xz" && \
+    mkdir -p /opt/blender && \
+    tar -xf /tmp/blender.tar.xz -C /opt/blender && \
+    rm /tmp/blender.tar.xz
 
 # Run as non-root (avoids permission headaches with mounted volumes)
 RUN useradd -m -s /bin/bash comfy
 USER comfy
 WORKDIR /app
 
-# --- PyTorch ---
+# ---- PyTorch ---
 RUN pip uninstall torch torchvision torchaudio
 RUN pip install --upgrade pip && \
     pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
         --index-url https://download.pytorch.org/whl/cu128
 
-# --- Trellis2 compiled extension wheels (prebuilt Linux x86_64 cp312 — no compilation) ---
+# ---- Trellis2 compiled extension wheels (prebuilt Linux x86_64 cp312 — no compilation) ---
 # flash_attn and nvdiffrec_render come from camenduru (built for Torch 2.8+cu128).
 # cumesh, flex_gemm, nvdiffrast, o_voxel come from the cloned ComfyUI-Trellis2 repo
 # (Torch270 Linux set — proven compatible with Torch 2.8.0 in testing).
@@ -57,7 +78,7 @@ ENV WHEELS=https://github.com/camenduru/wheels/releases/download/trellis2
 RUN pip install --no-cache-dir ${WHEELS}/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl
 RUN pip install --no-cache-dir ${WHEELS}/nvdiffrec_render-0.0.0-cp312-cp312-linux_x86_64.whl
 
-# --- Core Trellis2 Python dependencies ---
+# ---- Core Trellis2 Python dependencies ---
 RUN pip install \
     triton \
     pillow \
@@ -78,23 +99,37 @@ RUN pip install \
     requests \
     plyfile
 
-# --- ComfyUI-Trellis2 specific deps (heavier, separate layer for caching) ---
+# ---- ComfyUI-Trellis2 specific deps (heavier, separate layer for caching) ---
 RUN pip install \
     open3d \
     pymeshlab \
     meshlib
 
-# --- ComfyUI ---
+# ---- quickymesh API server dependencies ---
+# Pillow, requests, trimesh, numpy already installed above.
+RUN pip install \
+    "pydantic>=2.7.0" \
+    "python-dotenv>=1.0.0" \
+    "PyYAML>=6.0" \
+    "fastapi>=0.115.0" \
+    "uvicorn[standard]>=0.30.0" \
+    "sse-starlette>=2.1.0" \
+    "python-multipart>=0.0.9" \
+    "httpx>=0.27.0" \
+    "google-genai>=1.10.0" \
+    "python-json-logger>=3.2.0"
+
+# ---- ComfyUI ---
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git . && \
     pip install -r requirements.txt
 
-# --- ComfyUI-Trellis2 custom node ---
+# ---- ComfyUI-Trellis2 custom node ---
 # git-lfs is installed above so the wheels/ directory (cumesh, o_voxel etc.) is fetched too.
 RUN git clone https://github.com/visualbruno/ComfyUI-Trellis2.git \
         custom_nodes/ComfyUI-Trellis2 && \
     git -C custom_nodes/ComfyUI-Trellis2 checkout ef2286b47ce0ef0e681dffe0209aadd96de50f72
 
-# --- Install ControlNet Auxiliary Preprocessors ---
+# ---- Install ControlNet Auxiliary Preprocessors ---
 RUN git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git \
     /app/custom_nodes/comfyui_controlnet_aux
 
@@ -104,13 +139,12 @@ RUN pip install --no-cache-dir -r /app/custom_nodes/comfyui_controlnet_aux/requi
 # Ensure ONNX Runtime GPU for your GPU
 RUN pip install onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 
-# --- Install YOUR custom-built Torch 2.8.0 wheels ---
-# Create a temporary directory for the wheels
+# ---- Install YOUR custom-built Torch 2.8.0 wheels (SM 12.0 / RTX 5000 series) ---
+# Build context: repo root — so wheels are at docker/comfyui-trellis/local_wheels/
 RUN mkdir -p /tmp/local_wheels
-COPY local_wheels/*.whl /tmp/local_wheels/
+COPY --chown=comfy:comfy docker/comfyui-trellis/local_wheels/*.whl /tmp/local_wheels/
 
 # Install them in order
-# These now contain the remove_inner_faces and tiled_flexible_dual_grid_to_mesh APIs
 RUN pip install --no-cache-dir /tmp/local_wheels/cumesh-*.whl
 RUN pip install --no-cache-dir /tmp/local_wheels/flex_gemm-*.whl
 RUN pip install --no-cache-dir /tmp/local_wheels/nvdiffrast-*.whl
@@ -122,13 +156,13 @@ RUN pip install xformers==v0.0.32.post1
 # Clean up temporary files
 RUN rm -rf /tmp/local_wheels
 
-# --- Pre-download rembg u2net model (used by Trellis2PreProcessImage remove_background) ---
+# ---- Pre-download rembg u2net model (used by Trellis2PreProcessImage remove_background) ---
 # Without this it downloads from GitHub at runtime and times out.
 RUN mkdir -p /home/comfy/.u2net && \
     wget -q -O /home/comfy/.u2net/u2net.onnx \
         "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
 
-# --- Pre-download BiRefNet (used by some Trellis2 nodes) ---
+# ---- Pre-download BiRefNet (used by some Trellis2 nodes) ---
 RUN python3 -c "\
 from transformers import AutoModelForImageSegmentation; \
 AutoModelForImageSegmentation.from_pretrained('ZhengPeng7/BiRefNet', trust_remote_code=True)"
@@ -136,6 +170,29 @@ AutoModelForImageSegmentation.from_pretrained('ZhengPeng7/BiRefNet', trust_remot
 # Create placeholder dirs so ComfyUI starts cleanly even without volume mounts
 RUN mkdir -p models output input
 
-EXPOSE 8190
+# ---- quickymesh source code --------------------------------------------------
+# Build context is the repo root — copy source and config files.
+COPY --chown=comfy:comfy src /quickymesh/src
+COPY --chown=comfy:comfy api_server.py /quickymesh/api_server.py
+COPY --chown=comfy:comfy qm_cli.py /quickymesh/qm_cli.py
+COPY --chown=comfy:comfy defaults.yaml /quickymesh/defaults.yaml
+COPY --chown=comfy:comfy comfyui_workflows /quickymesh/comfyui_workflows
+COPY --chown=comfy:comfy blender_scripts /quickymesh/blender_scripts
 
-CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8190"]
+# Persistent data directories (overridden by volume mounts at runtime)
+RUN mkdir -p /quickymesh/pipeline_root /quickymesh/logs
+
+# ---- Startup script ----------------------------------------------------------
+COPY --chown=comfy:comfy docker/comfyui-trellis/startup.sh /startup.sh
+RUN chmod +x /startup.sh
+
+# ---- Runtime environment variables ------------------------------------------
+# These are defaults; all can be overridden via docker-compose environment:.
+ENV BLENDER_PATH=/opt/blender/blender-4.3.2-linux-x64/blender
+ENV COMFYUI_URL=http://localhost:8190
+ENV COMFYUI_OUTPUT_DIR=/app/output
+ENV OUTPUT_ROOT=/quickymesh/pipeline_root
+
+EXPOSE 8190 8000
+
+CMD ["/startup.sh"]

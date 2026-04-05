@@ -417,26 +417,32 @@ def _start_new_pipeline(client: QMClient) -> None:
             _inform(f"Image not found: {img_raw}\nPlease try again, or press Enter to skip.")
 
     # Description
+    _BACKGROUND_SUFFIX = (
+        "3/4 isometric view, three quarters lighting, "
+        "plain contrasting background, 1:1 ratio"
+    )
     if input_image_path:
         description = _ask("How do you want to change/adapt this image?")
     else:
         description = _ask(
             "Describe the 3-D object to generate:\n"
-            "(A background suffix will be appended automatically for Trellis)"
+            f'  (The suffix "{_BACKGROUND_SUFFIX}" will be appended automatically.\n'
+            "   Trellis needs these qualities to correctly reconstruct 3-D geometry.)"
         )
     if not description:
         _inform("Cancelled.")
         return
 
     # Poly count
-    polys_str = _ask("Target polygon count (Enter for default):")
+    _DEFAULT_POLYS = 8000
+    polys_str = _ask(f"Target polygon count (Enter for default: {_DEFAULT_POLYS}):")
     num_polys = int(polys_str) if polys_str.isdigit() else None
 
     # Symmetry
     _SYM_OPTIONS = ["x-", "x+", "y-", "y+", "z-", "z+"]
     sym_raw = _ask(
         f"Symmetrize mesh? Options: {', '.join(_SYM_OPTIONS)}\n"
-        "Enter an axis to enable, or leave blank to skip:"
+        "Enter an axis to enable, or leave blank to skip (Enter defaults to x-):"
     ).lower()
     if sym_raw in _SYM_OPTIONS:
         symmetrize, symmetry_axis = True, sym_raw
@@ -560,6 +566,14 @@ def _manage_pipeline(client: QMClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _get_output_root(client: QMClient) -> str:
+    """Return the server's output_root path (container path if using Docker)."""
+    try:
+        return client.get("/status").get("output_root", "pipeline_root")
+    except Exception:
+        return "pipeline_root"
+
+
 def _show_status(client: QMClient) -> None:
     status = client.get("/status")
     lines = ["=== Workers ==="]
@@ -572,6 +586,15 @@ def _show_status(client: QMClient) -> None:
         queued = f"  [{p['queued_tasks']} queued]" if p["queued_tasks"] else ""
         failed = f"  [{p['failed_tasks']} FAILED]" if p["failed_tasks"] else ""
         lines.append(f"  {p['name']}: {p['status']}{queued}{failed}")
+    output_root = status.get("output_root", "")
+    if output_root:
+        lines.append(f"\n=== Files ===")
+        lines.append(f"  Pipeline root (container) : {output_root}")
+        lines.append(f"  Final assets  (container) : {output_root}/final_game_ready_assets/")
+        lines.append(
+            "  (If running via Docker, host path = QUICKYMESH_PIPELINE_ROOT in docker/.env,\n"
+            "   defaulting to pipeline_root/ in the repo root.)"
+        )
     _inform("\n".join(lines))
 
 
@@ -665,7 +688,12 @@ def _handle_priority_pipeline(client: QMClient, name: str) -> bool:
     elif state["status"] == "mesh_review":
         result = _review_meshes(client, name, state)
         if result == "approved":
-            _inform(f"[{name}] Meshes approved and exported.")
+            output_root = _get_output_root(client)
+            _inform(
+                f"[{name}] Meshes approved and exported.\n"
+                f"  Final assets: {output_root}/final_game_ready_assets/\n"
+                f"  (Docker: host path = pipeline_root/final_game_ready_assets/ in repo root)"
+            )
         elif result == "all_rejected":
             _inform(f"[{name}] All meshes rejected — mesh generation re-queued.")
         elif result == "cancelled":
@@ -703,6 +731,12 @@ def _review_concept_art(client: QMClient, name: str, state: dict) -> str:
         # Show review sheet once per batch of images
         if not sheet_shown:
             sheet_shown = True
+            output_root = _get_output_root(client)
+            _inform(
+                f"\nConcept art images are in:\n"
+                f"  {output_root}/uncompleted_pipelines/{name}/concept_arts/\n"
+                f"  (If using Docker, host path = pipeline_root/uncompleted_pipelines/{name}/concept_arts/ in repo root)"
+            )
             try:
                 sheet_bytes = client.download(f"/pipelines/{name}/concept_art/sheet")
                 _show_image(sheet_bytes)
@@ -858,10 +892,46 @@ def _review_meshes(client: QMClient, name: str, state: dict) -> str:
         ]
 
         if not pending_meshes:
-            # Check overall outcome
-            has_approved = any(m["status"] == "approved" for m in state.get("meshes", []))
-            return "approved" if has_approved else "all_rejected"
+            # Check if more meshes are still generating/texturing/screenshotting
+            _IN_PROGRESS = {"queued", "generating", "texturing", "screenshotting"}
+            in_progress = [m for m in state.get("meshes", []) if m["status"] in _IN_PROGRESS]
+            if in_progress and state.get("status") == "mesh_review":
+                names_str = ", ".join(m["sub_name"] for m in in_progress)
+                _inform(
+                    f"\nWaiting for {len(in_progress)} more mesh(es) to finish: {names_str}\n"
+                    "  (press Ctrl-C to return to menu — generation continues in background)"
+                )
+                try:
+                    while True:
+                        time.sleep(5)
+                        try:
+                            state = client.get(f"/pipelines/{name}")
+                        except httpx.HTTPStatusError as exc:
+                            if exc.response.status_code == 404:
+                                return "approved"
+                            raise
+                        pending_meshes = [
+                            m for m in state.get("meshes", [])
+                            if m["status"] == "awaiting_approval"
+                        ]
+                        if pending_meshes:
+                            _inform(f"\n[{time.strftime('%H:%M:%S')}] New mesh ready for review!")
+                            break
+                        in_progress = [m for m in state.get("meshes", []) if m["status"] in _IN_PROGRESS]
+                        if not in_progress:
+                            break
+                except KeyboardInterrupt:
+                    _inform("\nReturning to menu.")
+                    return "approved"
+                if not pending_meshes:
+                    # All done — nothing came through
+                    has_approved = any(m["status"] == "approved" for m in state.get("meshes", []))
+                    return "approved" if has_approved else "all_rejected"
+            else:
+                has_approved = any(m["status"] == "approved" for m in state.get("meshes", []))
+                return "approved" if has_approved else "all_rejected"
 
+        output_root = _get_output_root(client)
         for mesh in pending_meshes:
             mesh_name = mesh["sub_name"]
 
@@ -872,9 +942,13 @@ def _review_meshes(client: QMClient, name: str, state: dict) -> str:
             except Exception as exc:
                 _inform(f"(No review sheet for '{mesh_name}': {exc})")
 
+            mesh_dir = f"{output_root}/uncompleted_pipelines/{name}/meshes/{mesh_name}"
             _inform(
                 f"\nMesh '{mesh_name}' is ready for review.\n"
-                "Actions:\n"
+                f"  GLB + screenshots: {mesh_dir}/\n"
+                f"  3-D preview: {mesh_dir}/preview.html\n"
+                f"  (Docker: host path = pipeline_root/uncompleted_pipelines/{name}/meshes/{mesh_name}/ in repo root)\n"
+                "\nActions:\n"
                 "  approve <asset_name> [format]  — approve and name the asset\n"
                 "  reject                          — reject this mesh\n"
                 "  cancel                          — cancel the pipeline\n"

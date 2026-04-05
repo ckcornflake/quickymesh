@@ -34,18 +34,13 @@ _POLL_INTERVAL = 1.0   # seconds between task-queue polls when idle
 
 
 def _notify_review_ready(pipeline_name: str, review_type: str) -> None:
-    """Print a prominent stdout notice (for the standalone CLI) and publish an SSE event."""
-    import sys
+    """Publish an SSE event to notify connected clients that review is ready."""
+    import logging
     from src.api.event_bus import event_bus
 
-    print(
-        f"\n>>> Pipeline '{pipeline_name}' {review_type} review is ready — "
-        "press Enter to review. <<<\n",
-        flush=True,
-        file=sys.stdout,
-    )
-
+    log = logging.getLogger(__name__)
     status_key = "concept_art_review" if review_type == "concept art" else "mesh_review"
+    log.info("Pipeline '%s' %s review is ready", pipeline_name, review_type)
     event_bus.publish({
         "event": "status_change",
         "pipeline": pipeline_name,

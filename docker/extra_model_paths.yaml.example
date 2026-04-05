@@ -7,6 +7,9 @@
 # avoiding duplicate copies of large files.
 #
 # Paths can use forward slashes on Windows.
+#
+# All three workflows (FLUX dev, ControlNet restyle, Trellis) share this
+# single model directory — no separate SDXL folder needed.
 
 central_models:
     base_path: C:/Users/YOUR_USERNAME/AI_Models/
@@ -20,6 +23,6 @@ central_models:
     embeddings: embeddings/
     diffusion_models: diffusion_models/
     text_encoders: text_encoders/
-    # Trellis-specific model dirs
+    # Trellis-specific model dirs (downloaded automatically via HuggingFace Hub)
     microsoft: microsoft/
     facebook: facebook/

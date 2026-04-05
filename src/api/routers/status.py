@@ -36,9 +36,11 @@ async def get_status(request: Request, user: CurrentUser):
             "failed_tasks": len(failed),
         })
 
+    cfg = request.app.state.cfg
     return {
         "workers": workers,
         "all_workers_alive": all(w["alive"] for w in workers),
         "pipeline_count": len(pipeline_names),
         "pipelines": pipelines,
+        "output_root": str(cfg.output_root),
     }

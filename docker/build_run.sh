@@ -33,7 +33,9 @@ case "$CMD" in
   start)
     echo "==> Starting container ..."
     docker compose -f "$COMPOSE_FILE" up -d $SVC
-    echo "  Trellis → http://localhost:8190"
+    echo "  ComfyUI       →  http://localhost:8190"
+    echo "  quickymesh API →  http://localhost:8000"
+    echo "  API docs       →  http://localhost:8000/docs"
     ;;
   all)
     echo "==> Building image ..."
@@ -41,7 +43,9 @@ case "$CMD" in
     echo "==> Starting container ..."
     docker compose -f "$COMPOSE_FILE" up -d $SVC
     echo ""
-    echo "  Trellis → http://localhost:8190"
+    echo "  ComfyUI       →  http://localhost:8190"
+    echo "  quickymesh API →  http://localhost:8000"
+    echo "  API docs       →  http://localhost:8000/docs"
     ;;
   stop)
     echo "==> Stopping container ..."

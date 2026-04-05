@@ -388,4 +388,6 @@ class TestComfyUITrellisWorker:
             v for v in submitted.values()
             if isinstance(v, dict) and v.get("class_type") == "Trellis2LoadMesh"
         )
-        assert load_mesh["inputs"]["glb_path"] == str(mesh.resolve())
+        # GLB is uploaded via ComfyUI API; worker passes the returned server filename
+        mock_client.upload_image.assert_called_with(mesh)
+        assert load_mesh["inputs"]["glb_path"] == "uploaded.png"

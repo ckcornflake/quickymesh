@@ -148,6 +148,14 @@ users.yaml
 docker/comfyui-trellis/local_wheels/*.whl
 docker/input/
 docker/output/
+# Model weights (~40 GB, downloaded by docker/download_models.sh)
+docker/models/
+
+# Claude Code project memory (local only)
+.claude/
+
+# Personal notes / task files
+doc_updates.md
 
 # Environments
 .env

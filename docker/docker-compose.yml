@@ -1,22 +1,47 @@
 services:
 
   # -----------------------------------------------------------------------
-  # ComfyUI Trellis2 — all AI workflows (FLUX, ControlNet restyle, Trellis)
-  # Port 8190 | Python 3.12 | PyTorch 2.8.0+cu128
+  # quickymesh runtime — ComfyUI + Trellis + quickymesh API server + Blender
+  #
+  # Ports:
+  #   8190 — ComfyUI web UI and API
+  #   8000 — quickymesh REST API (used by qm_cli.py and future web UI)
+  #
+  # Required env vars (set in docker/.env):
+  #   API_KEY          — API key for the quickymesh server (single-user mode)
+  #                      Or create users.yaml and mount it (see below)
+  #   GEMINI_API_KEY   — Gemini API key (if using the Gemini concept art backend)
+  #
+  # Optional env vars:
+  #   TRELLIS_MODELS_DIR   — host path to a shared models folder (~40 GB)
+  #                          Defaults to docker/models/trellis (populated by download_models.sh)
   # -----------------------------------------------------------------------
   comfyui-trellis:
     build:
-      context: ./comfyui-trellis
-      dockerfile: Dockerfile
-    image: comfyui-trellis:latest
-    container_name: comfyui-trellis
+      # Context is the repo root so the Dockerfile can COPY source code.
+      context: ../
+      dockerfile: docker/comfyui-trellis/Dockerfile
+    image: quickymesh-runtime:latest
+    container_name: quickymesh-runtime
     ports:
-      - "8190:8190"
+      - "8190:8190"   # ComfyUI
+      - "8000:8000"   # quickymesh API
     volumes:
+      # ---- ComfyUI model weights and I/O ----
       - ${TRELLIS_MODELS_DIR:-./models/trellis}:/app/models
       - ${TRELLIS_OUTPUT_DIR:-./output/trellis}:/app/output
       - ${TRELLIS_INPUT_DIR:-./input/trellis}:/app/input
+      # ---- HuggingFace model cache (Trellis, DINOv2, BiRefNet) ----
       - trellis-hf-cache:/home/comfy/.cache/huggingface
+      # ---- quickymesh persistent state ----
+      # NOTE: Docker Compose resolves ./pipeline_root relative to CWD at launch,
+      # so running from the repo root (the normal way) puts files in repo/pipeline_root/.
+      - ${QUICKYMESH_PIPELINE_ROOT:-./pipeline_root}:/quickymesh/pipeline_root
+      - ${QUICKYMESH_LOGS_DIR:-./logs}:/quickymesh/logs
+      # ---- Auth: mount users.yaml for multi-user mode (optional) ----
+      # Uncomment this line if you have a users.yaml file (see users.yaml.example in repo root).
+      # If absent, set API_KEY below for single-user mode.
+      # - ../users.yaml:/quickymesh/users.yaml:ro
     deploy:
       resources:
         reservations:
@@ -25,10 +50,22 @@ services:
               count: all
               capabilities: [gpu]
     environment:
+      # GPU passthrough
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # HuggingFace cache location
       - HF_HOME=/home/comfy/.cache/huggingface
       - HF_HUB_CACHE=/home/comfy/.cache/huggingface/hub
+      # quickymesh paths (already set in Dockerfile ENV — listed here for visibility)
+      - COMFYUI_URL=http://localhost:8190
+      - COMFYUI_OUTPUT_DIR=/app/output
+      - BLENDER_PATH=/opt/blender/blender-4.3.2-linux-x64/blender
+      - OUTPUT_ROOT=/quickymesh/pipeline_root
+      # quickymesh auth — single-user mode via API_KEY env var.
+      # Set in docker/.env.  Ignored if users.yaml is mounted above.
+      - API_KEY=${API_KEY:-}
+      # Gemini concept art backend (optional — leave blank to use FLUX only)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     restart: unless-stopped
 
 volumes:

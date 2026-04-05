@@ -1,0 +1,58 @@
+# .dockerignore — Exclude files from the Docker build context.
+# Build context is the repo root (set in docker/docker-compose.yml).
+# Only the files explicitly COPY'd in the Dockerfile are needed.
+
+# Git history
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets and local config (never bake into image)
+.env
+docker/.env
+
+# Pipeline output (can be GB of data)
+pipeline_root/
+docker/pipeline_root/
+
+# Model weights (mounted as volumes, not baked in)
+docker/models/
+
+# ComfyUI I/O directories
+docker/output/
+docker/input/
+
+# Test artifacts
+smoke_screenshots/
+smoke_trellis/
+smoke_test_output.png
+coverage_phase1.json
+
+# Test files (not needed at runtime)
+tests/
+
+# Documentation
+*.md
+DOC.md
+UPDATES.md
+
+# Logs
+logs/
+docker/logs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Claude Code memory
+.claude/

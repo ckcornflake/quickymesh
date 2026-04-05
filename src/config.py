@@ -114,17 +114,17 @@ class Config:
         return os.getenv("COMFYUI_URL", self._data["infrastructure"]["comfyui_url"])
 
     @property
-    def comfyui_install_dir(self) -> Path:
-        raw = os.getenv(
-            "COMFYUI_INSTALL_DIR", self._data["infrastructure"]["comfyui_install_dir"]
-        )
-        return Path(raw)
-
-    @property
     def comfyui_output_dir(self) -> Path:
         raw = os.getenv(
-            "COMFYUI_OUTPUT_DIR", self._data["infrastructure"]["comfyui_output_dir"]
+            "COMFYUI_OUTPUT_DIR",
+            self._data["infrastructure"].get("comfyui_output_dir", ""),
         )
+        if not raw:
+            raise EnvironmentError(
+                "COMFYUI_OUTPUT_DIR is not set.\n"
+                "Docker users: this should be set automatically — check docker/.env.\n"
+                "Non-Docker users: add COMFYUI_OUTPUT_DIR=/path/to/ComfyUI/output to .env"
+            )
         return Path(raw)
 
     @property

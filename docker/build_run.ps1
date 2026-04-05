@@ -20,18 +20,25 @@ switch ($Cmd) {
         docker compose -f $ComposeFile build $Svc
     }
     "start" {
-        Write-Host "==> Starting comfyui-trellis container ..."
+        Write-Host "==> Starting quickymesh-runtime container ..."
         docker compose -f $ComposeFile up -d $Svc
-        Write-Host "==> Trellis ComfyUI starting at http://localhost:8190"
+        Write-Host ""
+        Write-Host "  ComfyUI        ->  http://localhost:8190"
+        Write-Host "  quickymesh API ->  http://localhost:8000"
+        Write-Host "  API docs       ->  http://localhost:8000/docs"
+        Write-Host ""
         Write-Host "    Run '.\docker\build_run.ps1 logs' to watch startup progress."
     }
     "all" {
-        Write-Host "==> Building comfyui-trellis image ..."
+        Write-Host "==> Building quickymesh-runtime image ..."
         docker compose -f $ComposeFile build $Svc
-        Write-Host "==> Starting comfyui-trellis container ..."
+        Write-Host "==> Starting quickymesh-runtime container ..."
         docker compose -f $ComposeFile up -d $Svc
         Write-Host ""
-        Write-Host "==> Trellis ComfyUI is starting at http://localhost:8190"
+        Write-Host "  ComfyUI        ->  http://localhost:8190"
+        Write-Host "  quickymesh API ->  http://localhost:8000"
+        Write-Host "  API docs       ->  http://localhost:8000/docs"
+        Write-Host ""
         Write-Host "    Run '.\docker\build_run.ps1 logs' to watch startup progress."
     }
     "stop" {

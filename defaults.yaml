@@ -1,7 +1,6 @@
 gemini:
-  # Primary image generation model
+  # Primary image generation model (override with GEMINI_MODEL env var)
   model: "gemini-2.5-flash-image"
-  # Alternative model (override in .env as GEMINI_MODEL)
   alternative_model: "gemini-3.1-flash-image-preview"
 
 generation:
@@ -23,15 +22,26 @@ generation:
   concept_art_image_size: 1024
 
 infrastructure:
-  comfyui_url: "http://localhost:8188"
-  comfyui_install_dir: "C:/Users/jmkel/Downloads/ComfyUI_windows_portable_nvidia_cu128/ComfyUI_windows_portable"
-  # The output/ directory where ComfyUI writes results.
-  # For the portable build this is inside the inner ComfyUI/ subfolder.
-  comfyui_output_dir: "C:/Users/jmkel/Downloads/ComfyUI_windows_portable_nvidia_cu128/ComfyUI_windows_portable/ComfyUI/output"
+  # ComfyUI server URL.
+  # Docker users: leave as-is (container exposes :8190, env var is set automatically).
+  # Non-Docker users: change to your ComfyUI port (typically 8188 for a portable install).
+  comfyui_url: "http://localhost:8190"
+
+  # Directory where ComfyUI writes output files (images, meshes).
+  # Docker users: set COMFYUI_OUTPUT_DIR in docker/.env (auto-set to /app/output in container).
+  # Non-Docker users: set COMFYUI_OUTPUT_DIR in .env to your ComfyUI output folder, e.g.:
+  #   COMFYUI_OUTPUT_DIR=C:/path/to/ComfyUI/output
+  comfyui_output_dir: ""
+
   comfyui_poll_interval: 2.0
   comfyui_timeout: 600.0
+
+  # Blender executable path.
+  # Docker users: leave as-is (Blender is installed in the container automatically).
+  # Non-Docker users on Windows: update to your Blender install path.
+  # Non-Docker users on Linux: set BLENDER_PATH=blender (if on PATH) or full path.
   blender_path: "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
 
 output:
-  # Root directory for all pipeline output (relative to repo root or absolute)
+  # Root directory for all pipeline output (relative to repo root or absolute).
   root: "pipeline_root"
