@@ -137,6 +137,11 @@ celerybeat.pid
 # Pipeline output (local only)
 pipeline_root/
 
+# Smoke test outputs
+smoke_trellis/
+smoke_screenshots/
+smoke_test_output.png
+
 # Logs
 logs/
 coverage_phase1.json
