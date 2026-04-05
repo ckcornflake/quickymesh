@@ -165,7 +165,12 @@ class PipelineState(BaseModel):
     @classmethod
     def load(cls, path: Path) -> PipelineState:
         """Deserialise from a JSON file."""
-        return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
+        import json
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        # Migrate legacy "auto" symmetry_axis (removed — default to x-)
+        if data.get("symmetry_axis") == "auto":
+            data["symmetry_axis"] = "x-"
+        return cls.model_validate(data)
 
     # ------------------------------------------------------------------
     # Convenience queries
