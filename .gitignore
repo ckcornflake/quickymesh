@@ -149,8 +149,6 @@ coverage_phase1.json
 # Local config (contains real API keys)
 users.yaml
 
-# Compiled CUDA wheels (platform-specific, rebuild with docker/build-wheels/)
-docker/comfyui-trellis/local_wheels/*.whl
 docker/input/
 docker/output/
 # Model weights (~40 GB, downloaded by docker/download_models.sh)

@@ -9,7 +9,7 @@
 # Dockerfile location: docker/comfyui-trellis/Dockerfile
 #
 # Base: CUDA 12.8 runtime on Ubuntu 24.04 (Python 3.12 — required for cp312 wheels)
-# Wheel sources: https://github.com/camenduru/wheels/releases/tag/trellis2
+# Wheel sources: https://github.com/visualbruno/ComfyUI-Trellis2/tree/main/wheels/Linux/Torch291
 
 FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
 
@@ -67,16 +67,8 @@ WORKDIR /app
 # ---- PyTorch ---
 RUN pip uninstall torch torchvision torchaudio
 RUN pip install --upgrade pip && \
-    pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
+    pip install torch==2.9.1+cu128 torchvision==0.24.1+cu128 torchaudio==2.9.1+cu128 \
         --index-url https://download.pytorch.org/whl/cu128
-
-# ---- Trellis2 compiled extension wheels (prebuilt Linux x86_64 cp312 — no compilation) ---
-# flash_attn and nvdiffrec_render come from camenduru (built for Torch 2.8+cu128).
-# cumesh, flex_gemm, nvdiffrast, o_voxel come from the cloned ComfyUI-Trellis2 repo
-# (Torch270 Linux set — proven compatible with Torch 2.8.0 in testing).
-ENV WHEELS=https://github.com/camenduru/wheels/releases/download/trellis2
-RUN pip install --no-cache-dir ${WHEELS}/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl
-RUN pip install --no-cache-dir ${WHEELS}/nvdiffrec_render-0.0.0-cp312-cp312-linux_x86_64.whl
 
 # ---- Core Trellis2 Python dependencies ---
 RUN pip install \
@@ -127,7 +119,20 @@ RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git . && \
 # git-lfs is installed above so the wheels/ directory (cumesh, o_voxel etc.) is fetched too.
 RUN git clone https://github.com/visualbruno/ComfyUI-Trellis2.git \
         custom_nodes/ComfyUI-Trellis2 && \
-    git -C custom_nodes/ComfyUI-Trellis2 checkout ef2286b47ce0ef0e681dffe0209aadd96de50f72
+    git -C custom_nodes/ComfyUI-Trellis2 checkout e7c959b
+
+# ---- Trellis2 compiled extension wheels (prebuilt Linux x86_64 cp312 for Torch 2.9.1) ---
+# These come directly from the cloned ComfyUI-Trellis2 repo (visualbruno's Torch291 Linux set).
+# All 6 wheels are built together for Torch 2.9.1+cu128 — no ABI mismatches.
+# Note: flash_attn is NOT installed separately; PyTorch 2.9+ includes native SDPA which
+# Trellis2 uses via the 'sdpa' backend (added by visualbruno).
+ENV VB_WHEELS=custom_nodes/ComfyUI-Trellis2/wheels/Linux/Torch291
+RUN pip install --no-cache-dir ${VB_WHEELS}/cumesh-1.0-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir ${VB_WHEELS}/flex_gemm-0.0.1-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir ${VB_WHEELS}/nvdiffrast-0.4.0-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir ${VB_WHEELS}/nvdiffrec_render-0.0.0-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir --no-deps ${VB_WHEELS}/o_voxel-0.0.1-cp312-cp312-linux_x86_64.whl
+RUN pip install --no-cache-dir ${VB_WHEELS}/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl
 
 # ---- Install ControlNet Auxiliary Preprocessors ---
 RUN git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git \
@@ -139,22 +144,17 @@ RUN pip install --no-cache-dir -r /app/custom_nodes/comfyui_controlnet_aux/requi
 # Ensure ONNX Runtime GPU for your GPU
 RUN pip install onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 
-# ---- Install YOUR custom-built Torch 2.8.0 wheels (SM 12.0 / RTX 5000 series) ---
-# Build context: repo root — so wheels are at docker/comfyui-trellis/local_wheels/
-RUN mkdir -p /tmp/local_wheels
-COPY --chown=comfy:comfy docker/comfyui-trellis/local_wheels/*.whl /tmp/local_wheels/
-
-# Install them in order
-RUN pip install --no-cache-dir /tmp/local_wheels/cumesh-*.whl
-RUN pip install --no-cache-dir /tmp/local_wheels/flex_gemm-*.whl
-RUN pip install --no-cache-dir /tmp/local_wheels/nvdiffrast-*.whl
-RUN pip install --no-cache-dir --no-deps /tmp/local_wheels/o_voxel-*.whl
+# flash_attn — required by Trellis2 attention backend.
+# Pre-built wheel for torch 2.9 + cu12 from the official flash-attention GitHub releases.
+RUN pip install --no-cache-dir \
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
 # From https://www.youtube.com/watch?v=OkK-BfLiS2Q
-RUN pip install xformers==v0.0.32.post1
+RUN pip install xformers --index-url https://download.pytorch.org/whl/cu128
 
-# Clean up temporary files
-RUN rm -rf /tmp/local_wheels
+# Re-pin torchvision — requirements.txt installs above can override it with a CPU-only build
+RUN pip install --force-reinstall torchvision==0.24.1+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # ---- Pre-download rembg u2net model (used by Trellis2PreProcessImage remove_background) ---
 # Without this it downloads from GitHub at runtime and times out.
