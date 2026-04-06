@@ -38,6 +38,13 @@ services:
       # so running from the repo root (the normal way) puts files in repo/pipeline_root/.
       - ${QUICKYMESH_PIPELINE_ROOT:-./pipeline_root}:/quickymesh/pipeline_root
       - ${QUICKYMESH_LOGS_DIR:-./logs}:/quickymesh/logs
+      # ---- quickymesh source code (live reload — no rebuild needed for code changes) ----
+      - ../src:/quickymesh/src
+      - ../api_server.py:/quickymesh/api_server.py
+      - ../qm_cli.py:/quickymesh/qm_cli.py
+      - ../defaults.yaml:/quickymesh/defaults.yaml
+      - ../comfyui_workflows:/quickymesh/comfyui_workflows
+      - ../blender_scripts:/quickymesh/blender_scripts
       # ---- Auth: mount users.yaml for multi-user mode (optional) ----
       # Uncomment this line if you have a users.yaml file (see users.yaml.example in repo root).
       # If absent, set API_KEY below for single-user mode.
