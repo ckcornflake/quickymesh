@@ -187,3 +187,41 @@ class TestConcurrency:
             t.join()
 
         assert errors == [], f"Concurrent access detected: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# holder_changed
+# ---------------------------------------------------------------------------
+
+
+class TestHolderChanged:
+    def test_first_call_returns_true(self):
+        arb = VRAMArbiter()
+        obj = object()
+        assert arb.holder_changed(obj) is True
+
+    def test_same_holder_twice_returns_false(self):
+        arb = VRAMArbiter()
+        obj = object()
+        arb.holder_changed(obj)
+        assert arb.holder_changed(obj) is False
+
+    def test_different_holder_returns_true(self):
+        arb = VRAMArbiter()
+        a, b = object(), object()
+        arb.holder_changed(a)
+        assert arb.holder_changed(b) is True
+
+    def test_alternating_holders_always_returns_true(self):
+        arb = VRAMArbiter()
+        a, b = object(), object()
+        arb.holder_changed(a)
+        assert arb.holder_changed(b) is True
+        assert arb.holder_changed(a) is True
+
+    def test_records_new_holder_after_change(self):
+        arb = VRAMArbiter()
+        a, b = object(), object()
+        arb.holder_changed(a)
+        arb.holder_changed(b)
+        assert arb.holder_changed(b) is False

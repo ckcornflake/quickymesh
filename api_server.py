@@ -75,6 +75,7 @@ def build_app():
         comfyui_output_dir=config.comfyui_output_dir,
         workflow_generate=config.workflow_generate,
         workflow_texture=config.workflow_texture,
+        arbiter=arbiter,
     )
 
     screenshot_worker = BlenderScreenshotWorker(

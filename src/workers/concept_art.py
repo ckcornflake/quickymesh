@@ -221,7 +221,8 @@ class FluxComfyUIConceptArtWorker(ConceptArtWorker):
             if self._arbiter else nullcontext()
         )
         with ctx:
-            self._client.free_memory()  # evict any previously loaded model (e.g. Trellis)
+            if self._arbiter and self._arbiter.holder_changed(self):
+                self._client.free_memory()  # evict previous worker's models on transition
             history = self._client.run_workflow_and_get_history(workflow)
         return _extract_comfyui_image(history, self._client)
 
@@ -308,8 +309,9 @@ class ControlNetRestyleWorker:
             if self._arbiter else nullcontext()
         )
         with ctx:
+            if self._arbiter and self._arbiter.holder_changed(self):
+                self._client.free_memory()  # evict previous worker's models on transition
             history = self._client.run_workflow_and_get_history(workflow)
-            self._client.free_memory()
 
         return _extract_comfyui_image(history, self._client)
 

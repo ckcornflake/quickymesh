@@ -99,8 +99,10 @@ class ComfyUITrellisWorker(TrellisWorker):
         workflow_generate: Path,
         workflow_texture: Path,
         seed: int | None = None,
+        arbiter=None,             # VRAMArbiter | None
     ):
         self._client = client
+        self._arbiter = arbiter
         self._output_dir = Path(comfyui_output_dir)
         self._base_generate = json.loads(Path(workflow_generate).read_text(encoding="utf-8"))
         self._base_texture = json.loads(Path(workflow_texture).read_text(encoding="utf-8"))
@@ -133,7 +135,8 @@ class ComfyUITrellisWorker(TrellisWorker):
                 filename_prefix=job_id,
             )
 
-            self._client.free_memory()  # evict any previously loaded model (e.g. FLUX)
+            if self._arbiter and self._arbiter.holder_changed(self):
+                self._client.free_memory()  # evict previous worker's models on transition
             started_at = time.time()
             self._client.run_workflow(workflow)
 
@@ -175,7 +178,8 @@ class ComfyUITrellisWorker(TrellisWorker):
                 filename_prefix=f"{job_id}_tex",
             )
 
-            self._client.free_memory()  # evict any previously loaded model (e.g. FLUX)
+            if self._arbiter and self._arbiter.holder_changed(self):
+                self._client.free_memory()  # evict previous worker's models on transition
             started_at = time.time()
             self._client.run_workflow(workflow)
 

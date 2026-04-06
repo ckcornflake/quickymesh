@@ -13,7 +13,7 @@
       "backend": "flash_attn",
       "device": "cuda",
       "offload_models": false,
-      "keep_models_loaded": false,
+      "keep_models_loaded": true,
       "low_vram": false
     }
   },
@@ -28,7 +28,8 @@
     "inputs": {
       "image": ["2", 0],
       "padding": 0,
-      "remove_background": true
+      "remove_background": true,
+      "max_size": 1024
     }
   },
   "4": {
@@ -54,6 +55,7 @@
       "double_side_material": false,
       "texture_guidance_interval_start": 0.0,
       "texture_guidance_interval_end": 0.9,
+      "inpainting": "telea",
       "bake_on_vertices": false,
       "use_custom_normals": false,
       "mesh_cluster_threshold_cone_half_angle_rad": 60.0,

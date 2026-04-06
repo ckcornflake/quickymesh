@@ -31,6 +31,19 @@ class VRAMArbiter:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._last_holder: object | None = None
+
+    def holder_changed(self, new_holder: object) -> bool:
+        """Return True if `new_holder` is different from the previous holder, and record it.
+
+        Workers call this inside the acquired lock to decide whether to flush
+        ComfyUI's VRAM before running — only necessary when switching between
+        different workflow types (e.g. Trellis → Flux), not between consecutive
+        runs of the same worker.
+        """
+        changed = self._last_holder is not new_holder
+        self._last_holder = new_holder
+        return changed
 
     @contextmanager
     def acquire(self, timeout: float = 0):

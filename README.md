@@ -29,8 +29,8 @@ Multiple pipelines run concurrently. Background worker threads handle GPU work s
 | NVIDIA driver | **550+** (CUDA 12.x) |
 | Docker | Docker Desktop (Windows) or Docker Engine (Linux) with GPU passthrough |
 | WSL 2 | Required on Windows for Docker with NVIDIA GPU support |
-| Blender | **4.x**, installed on the host (not in Docker). Default path: `C:/Program Files/Blender Foundation/Blender 4.5/blender.exe` |
-| Disk | **~50 GB** free for Docker images + model weights |
+| Blender | Included in the Docker image — nothing to install on the host. |
+| Disk | **~60 GB** free for Docker image (~20 GB) + model weights (~40 GB) |
 
 **Windows users:** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and enable the WSL 2 backend. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU passthrough inside Docker.
 
@@ -77,9 +77,9 @@ The server, Blender, and ComfyUI all run inside Docker — nothing else is neede
 
 ## Docker setup
 
-The Docker container is the complete runtime — ComfyUI, the quickymesh API server, and Blender all run inside one image. Nothing else needs to be installed on the host beyond Python for `qm_cli.py`.  
+The Docker container is the complete runtime — ComfyUI, the quickymesh API server, and Blender all run inside one image. Nothing else needs to be installed on the host beyond Python for `qm_cli.py`.
 
-> **Time warning:** The first build downloads and compiles CUDA extensions. Expect **20–45 minutes**. Subsequent builds use the cache and finish in seconds.
+> **Time warning:** The first build downloads PyTorch, ComfyUI, model dependencies, and Blender. Expect **30–60 minutes** on a typical connection. Subsequent builds use the Docker layer cache and finish in seconds unless the Dockerfile changes.
 
 ### Step 1 — Configure
 
@@ -92,7 +92,6 @@ Edit `docker/.env` and fill in at minimum:
 ```
 API_KEY=your-secret-api-key         # any string — used by the CLI to authenticate
 GEMINI_API_KEY=your_gemini_key      # only needed for the Gemini concept art backend
-TRELLIS_MODELS_DIR=/path/to/models  # optional: reuse an existing AI_Models folder
 ```
 
 ### Step 2 — Build the image
@@ -206,6 +205,40 @@ When using the Docker container, set `COMFYUI_OUTPUT_DIR` in `.env` to the host 
 
 ---
 
+## Workflow tuning
+
+The ComfyUI workflow JSONs live in `comfyui_workflows/`. Most settings are fixed at sensible defaults, but the following are worth knowing about if you want to tune quality, speed, or VRAM usage. Edit the JSON files directly and rebuild the container.
+
+### Mesh generation (`trellis_generate.json`)
+
+| Setting | Node | Default | Notes |
+|---|---|---|---|
+| `pipeline_type` | Generator | `"512"` | Voxel resolution: `"512"` or `"768"`. Higher = more geometric detail, more VRAM. |
+| `sparse_structure_steps` | Generator | `12` | Step count for the sparse structure diffusion pass. Lower (e.g. `6`) = faster, less accurate overall shape. |
+| `shape_steps` | Generator | `12` | Step count for the detailed shape SLat diffusion pass. Lower = faster, less surface detail. |
+| `max_views` | Generator | `4` | Number of viewpoints sampled during generation. Higher = more geometrically consistent from all angles, slower. |
+| `low_vram` | LoadModel | `false` | Set `true` on 16 GB cards if you get OOM errors during mesh generation. |
+| `dual_contouring_resolution` | Remesh | `"Auto"` | Force `"256"` for faster remesh, `"512"` for more detail. |
+| `keep_models_loaded` | LoadModel | `true` | Keeps Trellis models in VRAM between meshes. Set `false` if you need VRAM freed immediately after generation. |
+
+### Texturing (`trellis_texture.json`)
+
+| Setting | Node | Default | Notes |
+|---|---|---|---|
+| `texture_size` | Texturing | `4096` | Output texture atlas resolution: `512`/`1024`/`2048`/`4096`. Lower = faster, smaller file. |
+| `texture_steps` | Texturing | `12` | Diffusion step count for texture generation. Lower = faster but lower quality. |
+| `resolution` | Texturing | `1024` | Multi-view render resolution used during texturing. Lower = faster. |
+| `front_axis` | Texturing | `"z"` | Orientation of the input image relative to the mesh. Change to `"x"` or `"y"` if the texture appears rotated. |
+| `keep_models_loaded` | LoadModel | `true` | Same as above — keeps models in VRAM between texture passes. |
+
+### VRAM notes
+
+With `keep_models_loaded: true` (default), Trellis models (~12 GB) stay in VRAM across consecutive mesh generations — significantly reducing per-mesh time since model loading is skipped. When you switch to FLUX concept art generation, quickymesh automatically evicts the Trellis models first.
+
+On 16 GB cards running both FLUX and Trellis, you may need to set `keep_models_loaded: false` in both workflow files if you encounter OOM errors.
+
+---
+
 ## Output layout
 
 ```
@@ -231,7 +264,7 @@ pipeline_root/
 
 ## Testing
 
-All 498 tests are fully mocked — no real API or GPU needed:
+All 503 tests are fully mocked — no real API or GPU needed:
 
 ```bash
 python -m pytest tests/ -v

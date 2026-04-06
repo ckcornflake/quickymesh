@@ -17,7 +17,7 @@
       "backend": "flash_attn",
       "device": "cuda",
       "low_vram": false,
-      "keep_models_loaded": false
+      "keep_models_loaded": true
     }
   },
   "2": {
@@ -32,7 +32,8 @@
     "inputs": {
       "image": ["2", 2],
       "padding": 25,
-      "remove_background": true
+      "remove_background": true,
+      "max_size": 1024
     }
   },
   "4": {

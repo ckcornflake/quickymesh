@@ -159,6 +159,7 @@ docker/models/
 
 # Personal notes / task files
 doc_updates.md
+DOC.md
 
 # Environments
 .env
