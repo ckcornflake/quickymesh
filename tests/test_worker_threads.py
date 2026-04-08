@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from PIL import Image
 
 from src.agent.worker_threads import (
     ConceptArtWorkerThread,
@@ -22,7 +23,8 @@ from src.broker import Broker
 from src.config import Config
 from src.state import (
     ConceptArtStatus,
-    MeshStatus,
+    Pipeline3DState,
+    Pipeline3DStatus,
     PipelineState,
 )
 from src.vram_arbiter import VRAMArbiter
@@ -85,14 +87,39 @@ def cfg(tmp_path) -> Config:
 
 @pytest.fixture
 def pipeline_state_path(tmp_path, cfg) -> Path:
-    """Create a minimal pipeline state and return its path."""
-    pipeline_dir = tmp_path / "output" / "uncompleted_pipelines" / "testpipe"
-    pipeline_dir.mkdir(parents=True)
+    """Create a minimal 2D pipeline state for ConceptArtWorkerThread tests."""
+    pipeline_dir = cfg.pipelines_dir / "testpipe"
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
     state = PipelineState(
         name="testpipe",
         description="a blue dragon",
         num_polys=8000,
-        pipeline_dir="uncompleted_pipelines/testpipe",
+        pipeline_dir=str(pipeline_dir.relative_to(cfg.output_root)),
+    )
+    state_path = pipeline_dir / "state.json"
+    state.save(state_path)
+    return state_path
+
+
+@pytest.fixture
+def input_image(tmp_path, cfg) -> Path:
+    """A minimal PNG on disk."""
+    img = Image.new("RGB", (64, 64), color=(100, 150, 200))
+    p = tmp_path / "input.png"
+    img.save(str(p))
+    return p
+
+
+@pytest.fixture
+def pipeline_3d_state_path(tmp_path, cfg, input_image) -> Path:
+    """Create a minimal Pipeline3DState in QUEUED status."""
+    pipeline_dir = cfg.pipelines_dir / "testpipe3d"
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    state = Pipeline3DState(
+        name="testpipe3d",
+        input_image_path=str(input_image),
+        num_polys=8000,
+        pipeline_dir=str(pipeline_dir.relative_to(cfg.output_root)),
     )
     state_path = pipeline_dir / "state.json"
     state.save(state_path)
@@ -106,7 +133,6 @@ def pipeline_state_path(tmp_path, cfg) -> Path:
 
 class TestBaseWorkerThread:
     def test_stops_when_stop_event_set(self, broker, stop_event, cfg):
-        """Thread exits its loop when stop_event is set."""
         class NoopThread(_BaseWorkerThread):
             task_types = ["mesh_generate"]
             def _handle_task(self, task):
@@ -129,7 +155,6 @@ class TestBaseWorkerThread:
         broker.enqueue("pipe1", "mesh_generate")
         t = RecordThread(broker, stop_event, poll_interval=0.01)
         t.start()
-        # wait for task to be processed
         deadline = time.time() + 3
         while time.time() < deadline:
             tasks = broker.get_tasks(status="done")
@@ -236,7 +261,6 @@ class TestConceptArtWorkerThread:
         assert len(broker.get_tasks(status="failed")) == 1
 
     def test_processes_concept_art_modify(self, broker, stop_event, cfg, pipeline_state_path):
-        # First generate concept arts so there's something to modify
         from src.concept_art_pipeline import generate_concept_arts
         state = PipelineState.load(pipeline_state_path)
         pipeline_dir = pipeline_state_path.parent
@@ -274,23 +298,11 @@ class TestConceptArtWorkerThread:
 
 
 class TestTrellisWorkerThread:
-    def _make_state_mesh_ready(self, pipeline_state_path, cfg) -> PipelineState:
-        """Return a state with approved concept arts ready for mesh gen."""
-        from src.concept_art_pipeline import generate_concept_arts
-        state = PipelineState.load(pipeline_state_path)
-        pipeline_dir = pipeline_state_path.parent
-        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
-        for ca in state.concept_arts:
-            ca.status = ConceptArtStatus.APPROVED
-        state.save(pipeline_state_path)
-        return state
-
-    def test_processes_mesh_generate(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_mesh_ready(pipeline_state_path, cfg)
+    def test_processes_mesh_generate(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
         broker.enqueue(
-            "testpipe",
+            "testpipe3d",
             "mesh_generate",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         t = TrellisWorkerThread(
             broker, stop_event, MockTrellisWorker(), arbiter, cfg, poll_interval=0.01
@@ -304,28 +316,15 @@ class TestTrellisWorkerThread:
         stop_event.set()
         t.join(timeout=3)
 
-        # Chain ran too — at least the original task is done
         done = broker.get_tasks(status="done")
         assert any(t.task_type == "mesh_generate" for t in done)
 
-    def test_acquires_vram_lock_during_task(self, broker, stop_event, cfg, pipeline_state_path):
-        self._make_state_mesh_ready(pipeline_state_path, cfg)
+    def test_state_updated_after_mesh_generate(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
         broker.enqueue(
-            "testpipe",
+            "testpipe3d",
             "mesh_generate",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
-        arbiter = VRAMArbiter()
-        lock_acquired_times = []
-
-        original_acquire = arbiter.acquire
-
-        def spy_acquire(*args, **kwargs):
-            ctx = original_acquire(*args, **kwargs)
-            return ctx
-
-        arbiter.acquire = spy_acquire
-
         t = TrellisWorkerThread(
             broker, stop_event, MockTrellisWorker(), arbiter, cfg, poll_interval=0.01
         )
@@ -338,15 +337,35 @@ class TestTrellisWorkerThread:
         stop_event.set()
         t.join(timeout=3)
 
-        # Lock was released after task completed
+        state = Pipeline3DState.load(pipeline_3d_state_path)
+        assert state.mesh_path is not None
+
+    def test_acquires_vram_lock_during_task(self, broker, stop_event, cfg, pipeline_3d_state_path):
+        broker.enqueue(
+            "testpipe3d",
+            "mesh_generate",
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
+        )
+        arbiter = VRAMArbiter()
+        t = TrellisWorkerThread(
+            broker, stop_event, MockTrellisWorker(), arbiter, cfg, poll_interval=0.01
+        )
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if broker.get_tasks(status="done"):
+                break
+            time.sleep(0.05)
+        stop_event.set()
+        t.join(timeout=3)
+
         assert not arbiter.locked
 
-    def test_task_failed_on_trellis_error(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_mesh_ready(pipeline_state_path, cfg)
+    def test_task_failed_on_trellis_error(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
         broker.enqueue(
-            "testpipe",
+            "testpipe3d",
             "mesh_generate",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         failing_worker = MockTrellisWorker(fail_on_generate=True)
         t = TrellisWorkerThread(
@@ -370,26 +389,21 @@ class TestTrellisWorkerThread:
 
 
 class TestScreenshotWorkerThread:
-    def _make_state_texture_done(self, pipeline_state_path, cfg) -> PipelineState:
-        from src.concept_art_pipeline import generate_concept_arts
+    def _make_state_texture_done(self, pipeline_3d_state_path, cfg) -> Pipeline3DState:
         from src.mesh_pipeline import run_mesh_generation, run_mesh_texturing
-
-        state = PipelineState.load(pipeline_state_path)
-        pipeline_dir = pipeline_state_path.parent
-        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
-        for ca in state.concept_arts:
-            ca.status = ConceptArtStatus.APPROVED
+        state = Pipeline3DState.load(pipeline_3d_state_path)
+        pipeline_dir = pipeline_3d_state_path.parent
         run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
         run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, cfg)
-        state.save(pipeline_state_path)
+        state.save(pipeline_3d_state_path)
         return state
 
-    def test_processes_screenshot_task(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_texture_done(pipeline_state_path, cfg)
+    def test_processes_screenshot_task(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
+        self._make_state_texture_done(pipeline_3d_state_path, cfg)
         broker.enqueue(
-            "testpipe",
+            "testpipe3d",
             "screenshot",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         t = ScreenshotWorkerThread(
             broker, stop_event, MockScreenshotWorker(), arbiter, cfg, poll_interval=0.01
@@ -405,12 +419,12 @@ class TestScreenshotWorkerThread:
 
         assert len(broker.get_tasks(status="done")) == 1
 
-    def test_state_updated_after_screenshots(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_texture_done(pipeline_state_path, cfg)
+    def test_state_updated_after_screenshots(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
+        self._make_state_texture_done(pipeline_3d_state_path, cfg)
         broker.enqueue(
-            "testpipe",
+            "testpipe3d",
             "screenshot",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         t = ScreenshotWorkerThread(
             broker, stop_event, MockScreenshotWorker(), arbiter, cfg, poll_interval=0.01
@@ -424,18 +438,15 @@ class TestScreenshotWorkerThread:
         stop_event.set()
         t.join(timeout=3)
 
-        # Worker advances SCREENSHOT_DONE → AWAITING_APPROVAL so the review
-        # API/CLI sees meshes immediately without an extra transition step.
-        state = PipelineState.load(pipeline_state_path)
-        for m in state.meshes:
-            assert m.status == MeshStatus.AWAITING_APPROVAL
+        state = Pipeline3DState.load(pipeline_3d_state_path)
+        assert state.status == Pipeline3DStatus.AWAITING_APPROVAL
 
-    def test_screenshot_failure_marks_task_failed(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_texture_done(pipeline_state_path, cfg)
+    def test_screenshot_failure_marks_task_failed(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
+        self._make_state_texture_done(pipeline_3d_state_path, cfg)
         broker.enqueue(
-            "testpipe",
+            "testpipe3d",
             "screenshot",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         t = ScreenshotWorkerThread(
             broker, stop_event, MockScreenshotWorker(fail=True), arbiter, cfg, poll_interval=0.01
@@ -451,29 +462,6 @@ class TestScreenshotWorkerThread:
 
         assert len(broker.get_tasks(status="failed")) == 1
 
-    def test_screenshot_sets_pipeline_to_mesh_review(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_texture_done(pipeline_state_path, cfg)
-        broker.enqueue(
-            "testpipe",
-            "screenshot",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
-        )
-        t = ScreenshotWorkerThread(
-            broker, stop_event, MockScreenshotWorker(), arbiter, cfg, poll_interval=0.01
-        )
-        t.start()
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            if broker.get_tasks(status="done"):
-                break
-            time.sleep(0.05)
-        stop_event.set()
-        t.join(timeout=3)
-
-        from src.state import PipelineStatus
-        state = PipelineState.load(pipeline_state_path)
-        assert state.status == PipelineStatus.MESH_REVIEW
-
 
 # ---------------------------------------------------------------------------
 # Pipeline step chaining
@@ -483,16 +471,6 @@ class TestScreenshotWorkerThread:
 class TestPipelineChaining:
     """Verify that worker threads automatically enqueue the next step."""
 
-    def _make_state_mesh_ready(self, pipeline_state_path, cfg):
-        from src.concept_art_pipeline import generate_concept_arts
-        state = PipelineState.load(pipeline_state_path)
-        pipeline_dir = pipeline_state_path.parent
-        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
-        for ca in state.concept_arts:
-            ca.status = ConceptArtStatus.APPROVED
-        state.save(pipeline_state_path)
-        return state
-
     def _wait_for(self, broker, status, timeout=5):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -501,17 +479,15 @@ class TestPipelineChaining:
             time.sleep(0.05)
         return False
 
-    def test_mesh_generate_chains_mesh_texture(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
-        self._make_state_mesh_ready(pipeline_state_path, cfg)
+    def test_mesh_generate_chains_mesh_texture(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
         broker.enqueue(
-            "testpipe", "mesh_generate",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            "testpipe3d", "mesh_generate",
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         t = TrellisWorkerThread(
             broker, stop_event, MockTrellisWorker(), arbiter, cfg, poll_interval=0.01
         )
         t.start()
-        # After mesh_generate completes, mesh_texture should be queued
         assert self._wait_for(broker, "pending"), "mesh_texture was never enqueued"
         stop_event.set()
         t.join(timeout=3)
@@ -519,16 +495,16 @@ class TestPipelineChaining:
         texture_tasks = broker.get_tasks(task_type="mesh_texture")
         assert len(texture_tasks) >= 1
 
-    def test_mesh_texture_chains_screenshot(self, broker, stop_event, cfg, arbiter, pipeline_state_path):
+    def test_mesh_texture_chains_mesh_cleanup(self, broker, stop_event, cfg, arbiter, pipeline_3d_state_path):
         from src.mesh_pipeline import run_mesh_generation
-        state = self._make_state_mesh_ready(pipeline_state_path, cfg)
-        pipeline_dir = pipeline_state_path.parent
+        state = Pipeline3DState.load(pipeline_3d_state_path)
+        pipeline_dir = pipeline_3d_state_path.parent
         run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
-        state.save(pipeline_state_path)
+        state.save(pipeline_3d_state_path)
 
         broker.enqueue(
-            "testpipe", "mesh_texture",
-            {"pipeline_name": "testpipe", "state_path": str(pipeline_state_path)},
+            "testpipe3d", "mesh_texture",
+            {"pipeline_name": "testpipe3d", "state_path": str(pipeline_3d_state_path)},
         )
         t = TrellisWorkerThread(
             broker, stop_event, MockTrellisWorker(), arbiter, cfg, poll_interval=0.01

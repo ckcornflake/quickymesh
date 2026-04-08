@@ -175,11 +175,18 @@ class Config:
         return self.output_root / "final_game_ready_assets"
 
     @property
+    def pipelines_dir(self) -> Path:
+        """Unified directory for all 2D and 3D pipelines."""
+        return self.output_root / "pipelines"
+
+    @property
     def completed_pipelines_dir(self) -> Path:
+        """Deprecated: use pipelines_dir. Kept for reference during transition."""
         return self.output_root / "completed_pipelines"
 
     @property
     def uncompleted_pipelines_dir(self) -> Path:
+        """Deprecated: use pipelines_dir. Kept for reference during transition."""
         return self.output_root / "uncompleted_pipelines"
 
     # ------------------------------------------------------------------

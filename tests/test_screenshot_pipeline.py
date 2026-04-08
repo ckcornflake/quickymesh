@@ -2,7 +2,6 @@
 Tests for src/workers/screenshot.py and src/screenshot_pipeline.py.
 """
 
-import io
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,20 +9,16 @@ import pytest
 import yaml
 from PIL import Image
 
-from src.concept_art_pipeline import generate_concept_arts
 from src.config import Config
 from src.mesh_pipeline import run_mesh_generation, run_mesh_texturing
 from src.screenshot_pipeline import make_html_preview, run_cleanup, run_screenshots
-from src.state import ConceptArtStatus, MeshItem, MeshStatus, PipelineState, SymmetryAxis
-from src.concept_art_pipeline import generate_concept_arts
-from src.mesh_pipeline import run_mesh_generation, run_mesh_texturing
-from src.workers.concept_art import MockConceptArtWorker
+from src.state import Pipeline3DState, Pipeline3DStatus, SymmetryAxis
 from src.workers.screenshot import (
     DEFAULT_VIEWS,
     BlenderScreenshotWorker,
     MockScreenshotWorker,
 )
-from src.workers.trellis import MockTrellisWorker
+from src.workers.trellis import MockTrellisWorker, _make_minimal_glb
 
 
 # ---------------------------------------------------------------------------
@@ -62,26 +57,36 @@ def cfg(tmp_path) -> Config:
 
 @pytest.fixture
 def pipeline_dir(tmp_path) -> Path:
-    d = tmp_path / "uncompleted_pipelines" / "test_model"
+    d = tmp_path / "pipelines" / "test_model_1_0"
     d.mkdir(parents=True)
     return d
 
 
 @pytest.fixture
-def state_texture_done(pipeline_dir, cfg) -> PipelineState:
-    """State with 2 meshes in TEXTURE_DONE status."""
-    state = PipelineState(
-        name="test_model",
-        description="a red dragon",
+def input_image(pipeline_dir) -> Path:
+    img = Image.new("RGB", (64, 64), color=(100, 150, 200))
+    p = pipeline_dir / "input.png"
+    img.save(str(p))
+    return p
+
+
+def _make_3d_state_texture_done(pipeline_dir: Path, input_image: Path) -> Pipeline3DState:
+    """Create a Pipeline3DState in TEXTURE_DONE with a real GLB on disk."""
+    state = Pipeline3DState(
+        name="test_model_1_0",
+        input_image_path=str(input_image),
         num_polys=8000,
-        pipeline_dir="uncompleted_pipelines/test_model",
+        pipeline_dir=f"pipelines/test_model_1_0",
     )
-    generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
-    for ca in state.concept_arts:
-        ca.status = __import__("src.state", fromlist=["ConceptArtStatus"]).ConceptArtStatus.APPROVED
-    run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
-    run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, cfg)
+    run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, None)
+    run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, None)
     return state
+
+
+@pytest.fixture
+def state_texture_done(pipeline_dir, input_image) -> Pipeline3DState:
+    """3D pipeline state in TEXTURE_DONE status."""
+    return _make_3d_state_texture_done(pipeline_dir, input_image)
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +96,6 @@ def state_texture_done(pipeline_dir, cfg) -> PipelineState:
 
 class TestMockScreenshotWorker:
     def _make_glb(self, tmp_path) -> Path:
-        from src.workers.trellis import _make_minimal_glb
         p = tmp_path / "mesh.glb"
         p.write_bytes(_make_minimal_glb())
         return p
@@ -154,13 +158,11 @@ class TestBlenderScreenshotWorker:
         return BlenderScreenshotWorker(blender_path=blender_path, repo_root=repo_root)
 
     def _make_glb(self, tmp_path) -> Path:
-        from src.workers.trellis import _make_minimal_glb
         p = tmp_path / "mesh.glb"
         p.write_bytes(_make_minimal_glb())
         return p
 
     def _fake_successful_run(self, output_dir: Path, views=None):
-        """Side-effect: create fake PNG files, return success CompletedProcess."""
         import subprocess
         views = views or DEFAULT_VIEWS
         for view in views:
@@ -254,7 +256,6 @@ class TestBlenderScreenshotWorker:
 
 class TestMakeHtmlPreview:
     def _make_glb(self, tmp_path) -> Path:
-        from src.workers.trellis import _make_minimal_glb
         p = tmp_path / "mesh.glb"
         p.write_bytes(_make_minimal_glb())
         return p
@@ -295,86 +296,75 @@ class TestMakeHtmlPreview:
 
 
 # ---------------------------------------------------------------------------
-# run_screenshots (orchestration)
+# run_screenshots (orchestration on Pipeline3DState)
 # ---------------------------------------------------------------------------
 
 
 class TestRunScreenshots:
-    def test_advances_texture_done_to_screenshot_done(self, state_texture_done, pipeline_dir, cfg):
+    def test_status_becomes_screenshot_done(self, state_texture_done, pipeline_dir, cfg):
         run_screenshots(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state_texture_done.meshes:
-            assert m.status == MeshStatus.SCREENSHOT_DONE
+        assert state_texture_done.status == Pipeline3DStatus.SCREENSHOT_DONE
 
-    def test_screenshot_dir_set_on_mesh_item(self, state_texture_done, pipeline_dir, cfg):
+    def test_screenshot_dir_set(self, state_texture_done, pipeline_dir, cfg):
         run_screenshots(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state_texture_done.meshes:
-            assert m.screenshot_dir is not None
-            assert Path(m.screenshot_dir).exists()
+        assert state_texture_done.screenshot_dir is not None
+        assert Path(state_texture_done.screenshot_dir).exists()
 
     def test_review_sheet_created(self, state_texture_done, pipeline_dir, cfg):
         run_screenshots(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state_texture_done.meshes:
-            assert m.review_sheet_path is not None
-            assert Path(m.review_sheet_path).exists()
+        assert state_texture_done.review_sheet_path is not None
+        assert Path(state_texture_done.review_sheet_path).exists()
 
     def test_review_sheet_is_valid_image(self, state_texture_done, pipeline_dir, cfg):
         run_screenshots(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state_texture_done.meshes:
-            img = Image.open(m.review_sheet_path)
-            assert img.mode == "RGB"
+        img = Image.open(state_texture_done.review_sheet_path)
+        assert img.mode == "RGB"
 
-    def test_html_preview_created(self, state_texture_done, pipeline_dir, cfg):
-        run_screenshots(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state_texture_done.meshes:
-            assert m.html_preview_path is not None
-            assert Path(m.html_preview_path).exists()
-
-    def test_html_preview_is_html(self, state_texture_done, pipeline_dir, cfg):
-        run_screenshots(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state_texture_done.meshes:
-            content = Path(m.html_preview_path).read_text(encoding="utf-8")
-            assert "<html" in content.lower() or "<!DOCTYPE" in content
-
-    def test_skips_non_texture_done_meshes(self, pipeline_dir, cfg):
-        state = PipelineState(
-            name="test_model", description="x", num_polys=8000,
-            pipeline_dir="uncompleted_pipelines/test_model",
+    def test_skips_if_wrong_status(self, pipeline_dir, cfg, input_image):
+        state = Pipeline3DState(
+            name="test_model_1_0",
+            input_image_path=str(input_image),
+            num_polys=8000,
+            pipeline_dir="pipelines/test_model_1_0",
+            status=Pipeline3DStatus.QUEUED,
         )
-        state.meshes = [MeshItem(concept_art_index=0, sub_name="test_model_1",
-                                  status=MeshStatus.MESH_DONE)]
         worker = MockScreenshotWorker()
         run_screenshots(state, worker, pipeline_dir, cfg)
         assert len(worker.calls) == 0
-        assert state.meshes[0].status == MeshStatus.MESH_DONE
+        assert state.status == Pipeline3DStatus.QUEUED
+
+    def test_accepts_cleanup_done_status(self, state_texture_done, pipeline_dir, cfg):
+        """run_screenshots must process CLEANUP_DONE meshes too."""
+        state_texture_done.status = Pipeline3DStatus.CLEANUP_DONE
+        worker = MockScreenshotWorker()
+        run_screenshots(state_texture_done, worker, pipeline_dir, cfg)
+        assert len(worker.calls) == 1
+        assert state_texture_done.status == Pipeline3DStatus.SCREENSHOT_DONE
 
     def test_uses_textured_mesh_path_if_available(self, state_texture_done, pipeline_dir, cfg):
         worker = MockScreenshotWorker()
         run_screenshots(state_texture_done, worker, pipeline_dir, cfg)
-        for call, mesh_item in zip(worker.calls, state_texture_done.meshes):
-            assert call["mesh_path"] == Path(mesh_item.textured_mesh_path)
+        assert worker.calls[0]["mesh_path"] == Path(state_texture_done.textured_mesh_path)
 
     def test_uses_hdri_when_textured(self, state_texture_done, pipeline_dir, cfg):
         worker = MockScreenshotWorker()
         run_screenshots(state_texture_done, worker, pipeline_dir, cfg)
-        for call in worker.calls:
-            assert call["use_hdri"] is True
+        assert worker.calls[0]["use_hdri"] is True
 
     def test_screenshot_failure_propagates(self, state_texture_done, pipeline_dir, cfg):
         with pytest.raises(RuntimeError, match="simulated Blender failure"):
             run_screenshots(state_texture_done, MockScreenshotWorker(fail=True), pipeline_dir, cfg)
 
     def test_screenshot_pending_set_before_render(self, state_texture_done, pipeline_dir, cfg):
-        """Verify SCREENSHOT_PENDING is set on the item before the worker is called."""
         seen_statuses = []
-        original_take = MockScreenshotWorker.take_screenshots
 
         class StatusCapture(MockScreenshotWorker):
             def take_screenshots(self, mesh_path, output_dir, **kw):
-                seen_statuses.append(state_texture_done.meshes[0].status)
+                seen_statuses.append(state_texture_done.status)
                 return super().take_screenshots(mesh_path, output_dir, **kw)
 
         run_screenshots(state_texture_done, StatusCapture(), pipeline_dir, cfg)
-        assert MeshStatus.SCREENSHOT_PENDING in seen_statuses
+        assert Pipeline3DStatus.SCREENSHOT_PENDING in seen_statuses
 
 
 # ---------------------------------------------------------------------------
@@ -383,104 +373,75 @@ class TestRunScreenshots:
 
 
 class TestRunCleanup:
-    def _state_texture_done(self, pipeline_dir, cfg):
-        """Fresh state with 2 meshes in TEXTURE_DONE, mirroring the fixture above."""
-        state = PipelineState(
-            name="test_model", description="a red dragon", num_polys=8000,
-            pipeline_dir="uncompleted_pipelines/test_model",
+    def test_status_becomes_cleanup_done(self, state_texture_done, pipeline_dir, cfg):
+        run_cleanup(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
+        assert state_texture_done.status == Pipeline3DStatus.CLEANUP_DONE
+
+    def test_cleaned_file_exists_on_disk(self, state_texture_done, pipeline_dir, cfg):
+        run_cleanup(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
+        assert state_texture_done.textured_mesh_path is not None
+        assert Path(state_texture_done.textured_mesh_path).exists()
+        assert Path(state_texture_done.textured_mesh_path).name == "cleaned_mesh.glb"
+
+    def test_updates_textured_mesh_path(self, state_texture_done, pipeline_dir, cfg):
+        original = state_texture_done.textured_mesh_path
+        run_cleanup(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
+        assert state_texture_done.textured_mesh_path != original
+
+    def test_skips_if_not_texture_done(self, pipeline_dir, cfg, input_image):
+        state = Pipeline3DState(
+            name="test_model_1_0",
+            input_image_path=str(input_image),
+            num_polys=8000,
+            pipeline_dir="pipelines/test_model_1_0",
+            status=Pipeline3DStatus.MESH_DONE,
         )
-        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
-        for ca in state.concept_arts:
-            ca.status = ConceptArtStatus.APPROVED
-        run_mesh_generation(state, MockTrellisWorker(), pipeline_dir, cfg)
-        run_mesh_texturing(state, MockTrellisWorker(), pipeline_dir, cfg)
-        return state
-
-    def test_advances_to_cleanup_done(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
-        run_cleanup(state, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state.meshes:
-            assert m.status == MeshStatus.CLEANUP_DONE
-
-    def test_cleaned_file_exists_on_disk(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
-        run_cleanup(state, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m in state.meshes:
-            assert m.textured_mesh_path is not None
-            assert Path(m.textured_mesh_path).exists()
-            assert Path(m.textured_mesh_path).name == "cleaned_mesh.glb"
-
-    def test_updates_textured_mesh_path(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
-        original_paths = [m.textured_mesh_path for m in state.meshes]
-        run_cleanup(state, MockScreenshotWorker(), pipeline_dir, cfg)
-        for m, orig in zip(state.meshes, original_paths):
-            assert m.textured_mesh_path != orig
-
-    def test_skips_non_texture_done_meshes(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
-        state.meshes[0].status = MeshStatus.MESH_DONE  # not eligible
         worker = MockScreenshotWorker()
         run_cleanup(state, worker, pipeline_dir, cfg)
         cleanup_calls = [c for c in worker.calls if c["action"] == "cleanup"]
-        assert len(cleanup_calls) == 1  # only the second mesh
+        assert len(cleanup_calls) == 0
 
-    def test_worker_called_for_each_eligible_mesh(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
+    def test_passes_symmetrize_true_to_worker(self, state_texture_done, pipeline_dir, cfg):
+        state_texture_done.symmetrize = True
         worker = MockScreenshotWorker()
-        run_cleanup(state, worker, pipeline_dir, cfg)
+        run_cleanup(state_texture_done, worker, pipeline_dir, cfg)
         cleanup_calls = [c for c in worker.calls if c["action"] == "cleanup"]
-        assert len(cleanup_calls) == 2
+        assert cleanup_calls[0]["symmetrize"] is True
 
-    def test_passes_symmetrize_true_to_worker(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
-        state.symmetrize = True
+    def test_passes_symmetrize_false_by_default(self, state_texture_done, pipeline_dir, cfg):
         worker = MockScreenshotWorker()
-        run_cleanup(state, worker, pipeline_dir, cfg)
-        for call in [c for c in worker.calls if c["action"] == "cleanup"]:
-            assert call["symmetrize"] is True
+        run_cleanup(state_texture_done, worker, pipeline_dir, cfg)
+        cleanup_calls = [c for c in worker.calls if c["action"] == "cleanup"]
+        assert cleanup_calls[0]["symmetrize"] is False
 
-    def test_passes_symmetrize_false_by_default(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
+    def test_passes_symmetry_axis_to_worker(self, state_texture_done, pipeline_dir, cfg):
+        state_texture_done.symmetrize = True
+        state_texture_done.symmetry_axis = SymmetryAxis.X_PLUS
         worker = MockScreenshotWorker()
-        run_cleanup(state, worker, pipeline_dir, cfg)
-        for call in [c for c in worker.calls if c["action"] == "cleanup"]:
-            assert call["symmetrize"] is False
+        run_cleanup(state_texture_done, worker, pipeline_dir, cfg)
+        cleanup_calls = [c for c in worker.calls if c["action"] == "cleanup"]
+        assert cleanup_calls[0]["symmetry_axis"] == "x+"
 
-    def test_passes_symmetry_axis_to_worker(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
-        state.symmetrize = True
-        state.symmetry_axis = SymmetryAxis.X_PLUS
-        worker = MockScreenshotWorker()
-        run_cleanup(state, worker, pipeline_dir, cfg)
-        for call in [c for c in worker.calls if c["action"] == "cleanup"]:
-            assert call["symmetry_axis"] == "x+"
-
-    def test_failure_propagates(self, pipeline_dir, cfg):
-        state = self._state_texture_done(pipeline_dir, cfg)
+    def test_failure_propagates(self, state_texture_done, pipeline_dir, cfg):
         with pytest.raises(RuntimeError, match="simulated cleanup failure"):
-            run_cleanup(state, MockScreenshotWorker(fail=True), pipeline_dir, cfg)
+            run_cleanup(state_texture_done, MockScreenshotWorker(fail=True), pipeline_dir, cfg)
 
-    def test_cleanup_done_meshes_accepted_by_run_screenshots(self, pipeline_dir, cfg):
-        """run_screenshots must process CLEANUP_DONE meshes (not just TEXTURE_DONE)."""
-        state = self._state_texture_done(pipeline_dir, cfg)
-        run_cleanup(state, MockScreenshotWorker(), pipeline_dir, cfg)
-        # All meshes now CLEANUP_DONE
+    def test_cleanup_done_accepted_by_run_screenshots(self, state_texture_done, pipeline_dir, cfg):
+        """run_screenshots must process CLEANUP_DONE state."""
+        run_cleanup(state_texture_done, MockScreenshotWorker(), pipeline_dir, cfg)
+        assert state_texture_done.status == Pipeline3DStatus.CLEANUP_DONE
         worker = MockScreenshotWorker()
-        run_screenshots(state, worker, pipeline_dir, cfg)
-        assert len(worker.calls) == 2
-        for m in state.meshes:
-            assert m.status == MeshStatus.SCREENSHOT_DONE
+        run_screenshots(state_texture_done, worker, pipeline_dir, cfg)
+        assert len(worker.calls) == 1
+        assert state_texture_done.status == Pipeline3DStatus.SCREENSHOT_DONE
 
-    def test_status_set_to_cleaning_up_before_worker_called(self, pipeline_dir, cfg):
-        """CLEANING_UP must be set before the worker runs (crash-consistency)."""
+    def test_status_set_to_cleaning_up_before_worker(self, state_texture_done, pipeline_dir, cfg):
         seen_statuses = []
 
         class StatusCapture(MockScreenshotWorker):
             def cleanup_mesh(self, mesh_path, output_path, **kw):
-                seen_statuses.append(state.meshes[0].status)
+                seen_statuses.append(state_texture_done.status)
                 return super().cleanup_mesh(mesh_path, output_path, **kw)
 
-        state = self._state_texture_done(pipeline_dir, cfg)
-        run_cleanup(state, StatusCapture(), pipeline_dir, cfg)
-        assert MeshStatus.CLEANING_UP in seen_statuses
+        run_cleanup(state_texture_done, StatusCapture(), pipeline_dir, cfg)
+        assert Pipeline3DStatus.CLEANING_UP in seen_statuses

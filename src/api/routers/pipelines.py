@@ -24,7 +24,7 @@ from src.api.models import (
     OkResponse,
     PatchPipelineRequest,
 )
-from src.state import PipelineState, PipelineStatus
+from src.state import PipelineState, PipelineStatus, Pipeline3DStatus
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["pipelines"])
@@ -49,7 +49,7 @@ def _load_state(name: str, request: Request) -> PipelineState:
 
 def _state_path(name: str, request: Request):
     cfg = _cfg(request)
-    return cfg.uncompleted_pipelines_dir / name / "state.json"
+    return cfg.pipelines_dir / name / "state.json"
 
 
 # ---------------------------------------------------------------------------

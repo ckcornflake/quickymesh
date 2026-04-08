@@ -82,6 +82,29 @@ class RejectMeshRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 3D pipeline requests
+# ---------------------------------------------------------------------------
+
+
+class Create3DPipelineFromRefRequest(BaseModel):
+    """Submit a concept art image from a 2D pipeline for mesh generation."""
+    pipeline_name: str              # name of the source 2D pipeline
+    concept_art_index: int          # 0-based CA slot index
+    concept_art_version: Optional[int] = None  # defaults to current version
+    num_polys: Optional[int] = None
+    symmetrize: bool = False
+    symmetry_axis: str = "x-"
+
+
+class Create3DPipelineFromUploadRequest(BaseModel):
+    """Start a 3D pipeline from a user-provided name + uploaded image."""
+    name: str
+    num_polys: Optional[int] = None
+    symmetrize: bool = False
+    symmetry_axis: str = "x-"
+
+
+# ---------------------------------------------------------------------------
 # Generic responses
 # ---------------------------------------------------------------------------
 

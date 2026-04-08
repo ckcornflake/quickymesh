@@ -1,5 +1,7 @@
 """
-Screenshot + HTML preview pipeline — orchestration layer.
+Screenshot + HTML preview pipeline — orchestration layer for 3D pipelines.
+
+Operates on Pipeline3DState.
 
 Public API
 ----------
@@ -14,7 +16,7 @@ from pathlib import Path
 
 from src.config import Config, config as _default_config
 from src.image_utils import make_review_sheet
-from src.state import MeshItem, MeshStatus, PipelineState
+from src.state import Pipeline3DState, Pipeline3DStatus
 from src.workers.screenshot import ScreenshotWorker
 
 
@@ -76,46 +78,37 @@ def make_html_preview(
 
 
 def run_cleanup(
-    state: PipelineState,
+    state: Pipeline3DState,
     worker: ScreenshotWorker,
     pipeline_dir: Path,
     cfg: Config = _default_config,
 ) -> None:
     """
-    Run the mesh cleanup phase for every mesh in TEXTURE_DONE status.
+    Run mesh cleanup (shade-smooth + symmetrize) via Blender.
 
-    For each such mesh:
-      1. Call worker.cleanup_mesh() — applies shade-smooth (and symmetrize if
-         enabled) in Blender and exports a new cleaned_mesh.glb.
-      2. Update mesh_item.textured_mesh_path to point at the cleaned file so
-         run_screenshots and run_mesh_export use the cleaned version.
-      3. Advance mesh status to CLEANUP_DONE.
-
-    Updates state in place.  Caller is responsible for saving state to disk.
+    Only runs if the pipeline is in TEXTURE_DONE status.
+    Updates state in place.  Caller is responsible for saving state.
     """
+    if state.status != Pipeline3DStatus.TEXTURE_DONE:
+        return
+    if not state.textured_mesh_path:
+        return
+
     pipeline_dir = Path(pipeline_dir)
+    mesh_dir = pipeline_dir / "meshes"
+    cleaned_path = mesh_dir / "cleaned_mesh.glb"
 
-    for mesh_item in state.meshes:
-        if mesh_item.status != MeshStatus.TEXTURE_DONE:
-            continue
-        if not mesh_item.textured_mesh_path:
-            continue
+    state.status = Pipeline3DStatus.CLEANING_UP
 
-        mesh_item.status = MeshStatus.CLEANING_UP
+    worker.cleanup_mesh(
+        mesh_path=Path(state.textured_mesh_path),
+        output_path=cleaned_path,
+        symmetrize=state.symmetrize,
+        symmetry_axis=state.symmetry_axis.value,
+    )
 
-        sub_dir = pipeline_dir / mesh_item.sub_name / "meshes"
-        cleaned_path = sub_dir / "cleaned_mesh.glb"
-
-        worker.cleanup_mesh(
-            mesh_path=Path(mesh_item.textured_mesh_path),
-            output_path=cleaned_path,
-            symmetrize=state.symmetrize,
-            symmetry_axis=state.symmetry_axis.value,
-        )
-
-        # Point future steps at the cleaned mesh
-        mesh_item.textured_mesh_path = str(cleaned_path)
-        mesh_item.status = MeshStatus.CLEANUP_DONE
+    state.textured_mesh_path = str(cleaned_path)
+    state.status = Pipeline3DStatus.CLEANUP_DONE
 
 
 # ---------------------------------------------------------------------------
@@ -124,75 +117,59 @@ def run_cleanup(
 
 
 def run_screenshots(
-    state: PipelineState,
+    state: Pipeline3DState,
     worker: ScreenshotWorker,
     pipeline_dir: Path,
     cfg: Config = _default_config,
 ) -> None:
     """
-    Take screenshots for every mesh in CLEANUP_DONE status.
+    Take screenshots and build a review sheet + HTML preview.
 
-    Falls back to TEXTURE_DONE when the cleanup step was skipped (e.g. tests
-    that bypass the cleanup task).
-
-    For each such mesh:
-      1. Render 6 turntable views via `worker`.
-      2. Concatenate them into a review sheet.
-      3. Generate a Three.js HTML preview.
-      4. Advance mesh status to SCREENSHOT_DONE.
-
-    Uses HDRI lighting when a textured mesh is available; clay/matcap otherwise.
-    Updates state in place.  Caller is responsible for saving state to disk.
+    Accepts CLEANUP_DONE or TEXTURE_DONE (fallback when cleanup was skipped).
+    Updates state in place.  Caller is responsible for saving state.
     """
+    _ready = {Pipeline3DStatus.CLEANUP_DONE, Pipeline3DStatus.TEXTURE_DONE}
+    if state.status not in _ready:
+        return
+
     pipeline_dir = Path(pipeline_dir)
-    _ready = {MeshStatus.CLEANUP_DONE, MeshStatus.TEXTURE_DONE}
+    screenshot_dir = pipeline_dir / "screenshots"
 
-    for mesh_item in state.meshes:
-        if mesh_item.status not in _ready:
-            continue
+    render_path = Path(
+        state.textured_mesh_path if state.textured_mesh_path else state.mesh_path
+    )
+    use_hdri = state.textured_mesh_path is not None
 
-        sub_dir = pipeline_dir / mesh_item.sub_name
-        screenshot_dir = sub_dir / "screenshots"
+    state.status = Pipeline3DStatus.SCREENSHOT_PENDING
 
-        # Prefer the textured GLB for rendering; fall back to raw mesh
-        render_path = Path(
-            mesh_item.textured_mesh_path
-            if mesh_item.textured_mesh_path
-            else mesh_item.mesh_path
+    # 1. Render views
+    screenshots = worker.take_screenshots(
+        mesh_path=render_path,
+        output_dir=screenshot_dir,
+        use_hdri=use_hdri,
+        resolution=1024,
+    )
+
+    # 2. Review sheet
+    if screenshots:
+        review_sheet = make_review_sheet(
+            screenshots,
+            output_path=screenshot_dir / "reviewsheet.png",
+            thumb_size=cfg.review_sheet_thumb_size,
         )
-        use_hdri = mesh_item.textured_mesh_path is not None
+        state.review_sheet_path = str(review_sheet)
 
-        mesh_item.status = MeshStatus.SCREENSHOT_PENDING
-
-        # 1. Render views
-        screenshots = worker.take_screenshots(
-            mesh_path=render_path,
-            output_dir=screenshot_dir,
-            use_hdri=use_hdri,
-            resolution=1024,
+    # 3. HTML preview
+    try:
+        html_path = make_html_preview(
+            render_path,
+            output_path=pipeline_dir / "preview.html",
+            size=cfg.html_preview_size,
         )
+        state.html_preview_path = str(html_path)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"HTML preview failed: {e}")
 
-        # 2. Review sheet
-        if screenshots:
-            review_sheet = make_review_sheet(
-                screenshots,
-                output_path=screenshot_dir / "reviewsheet.png",
-                thumb_size=cfg.review_sheet_thumb_size,
-            )
-            mesh_item.review_sheet_path = str(review_sheet)
-
-        # 3. HTML preview
-        try:
-            html_path = make_html_preview(
-                render_path,
-                output_path=sub_dir / "preview.html",
-                size=cfg.html_preview_size,
-            )
-            mesh_item.html_preview_path = str(html_path)
-        except Exception as e:
-            # HTML preview is nice-to-have; don't block the pipeline on failure
-            import logging
-            logging.getLogger(__name__).warning(f"HTML preview failed: {e}")
-
-        mesh_item.screenshot_dir = str(screenshot_dir)
-        mesh_item.status = MeshStatus.SCREENSHOT_DONE
+    state.screenshot_dir = str(screenshot_dir)
+    state.status = Pipeline3DStatus.SCREENSHOT_DONE

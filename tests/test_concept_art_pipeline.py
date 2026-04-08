@@ -124,23 +124,20 @@ class TestGenerateConceptArts:
         worker = MockConceptArtWorker()
         generate_concept_arts(state, worker, pipeline_dir, cfg)
         for item in state.concept_arts:
-            assert item.image_path is not None
-            assert Path(item.image_path).exists()
+            assert _concept_art_path(pipeline_dir, item.index, item.version).exists()
 
     def test_images_are_1024x1024(self, state, pipeline_dir, cfg):
         worker = MockConceptArtWorker()
         generate_concept_arts(state, worker, pipeline_dir, cfg)
         for item in state.concept_arts:
-            img = Image.open(item.image_path)
+            img = Image.open(_concept_art_path(pipeline_dir, item.index, item.version))
             assert img.size == (1024, 1024)
 
     def test_images_have_white_background(self, state, pipeline_dir, cfg):
         worker = MockConceptArtWorker(image_size=32)
         generate_concept_arts(state, worker, pipeline_dir, cfg)
-        # Corner pixels should be white (padding area) for small source images
         for item in state.concept_arts:
-            img = Image.open(item.image_path)
-            # At least the background region should be white
+            img = Image.open(_concept_art_path(pipeline_dir, item.index, item.version))
             assert img.getpixel((0, 0)) == (255, 255, 255)
 
     def test_prompt_saved_to_all_prompts(self, state, pipeline_dir, cfg):
@@ -165,7 +162,7 @@ class TestGenerateConceptArts:
     def test_skips_already_ready_items(self, state, pipeline_dir, cfg):
         worker = MockConceptArtWorker()
         state.concept_arts = [
-            ConceptArtItem(index=0, status=ConceptArtStatus.READY, image_path="/existing.png"),
+            ConceptArtItem(index=0, status=ConceptArtStatus.READY),
             ConceptArtItem(index=1, status=ConceptArtStatus.PENDING),
             ConceptArtItem(index=2, status=ConceptArtStatus.PENDING),
         ]
@@ -201,7 +198,14 @@ class TestRegenerateConceptArts:
         self._setup(state, pipeline_dir, cfg)
         worker2 = MockConceptArtWorker()
         regenerate_concept_arts(state, worker2, pipeline_dir, [0], cfg)
-        assert Path(state.concept_arts[0].image_path).exists()
+        item = state.concept_arts[0]
+        assert _concept_art_path(pipeline_dir, item.index, item.version).exists()
+
+    def test_regenerate_increments_version(self, state, pipeline_dir, cfg):
+        self._setup(state, pipeline_dir, cfg)
+        original_version = state.concept_arts[0].version
+        regenerate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, [0], cfg)
+        assert state.concept_arts[0].version == original_version + 1
 
     def test_invalid_index_raises(self, state, pipeline_dir, cfg):
         self._setup(state, pipeline_dir, cfg)
@@ -228,10 +232,15 @@ class TestModifyConceptArt:
         self._setup(state, pipeline_dir, cfg)
         worker = MockConceptArtWorker(modify_color=(1, 2, 3))
         modify_concept_art(state, worker, pipeline_dir, 0, "make it blue")
-        img = Image.open(state.concept_arts[0].image_path)
-        # The modify colour was tiny (1,2,3) so after pad_to_square the centre
-        # pixel should reflect the modify colour
+        item = state.concept_arts[0]
+        img = Image.open(_concept_art_path(pipeline_dir, item.index, item.version))
         assert img.size == (1024, 1024)
+
+    def test_modify_increments_version(self, state, pipeline_dir, cfg):
+        self._setup(state, pipeline_dir, cfg)
+        original_version = state.concept_arts[0].version
+        modify_concept_art(state, MockConceptArtWorker(), pipeline_dir, 0, "make it blue")
+        assert state.concept_arts[0].version == original_version + 1
 
     def test_modify_records_instruction(self, state, pipeline_dir, cfg):
         self._setup(state, pipeline_dir, cfg)
@@ -256,7 +265,7 @@ class TestModifyConceptArt:
             modify_concept_art(state, MockConceptArtWorker(), pipeline_dir, 99, "x")
 
     def test_modify_without_image_raises(self, state, pipeline_dir, cfg):
-        # Item has no image_path yet
+        # Item at version 0 with no file on disk
         state.concept_arts = [ConceptArtItem(index=0)]
         with pytest.raises(ValueError, match="no image"):
             modify_concept_art(state, MockConceptArtWorker(), pipeline_dir, 0, "x")
@@ -325,15 +334,16 @@ class TestRunConceptArtReview:
 
     def test_regenerate_then_approve(self, state, pipeline_dir, cfg):
         self._generate(state, pipeline_dir, cfg)
-        ui = MockPromptInterface(["regenerate 1", "approve 1"])
+        # Interactive: "regenerate" triggers "Which image?" prompt → pick 1
+        ui = MockPromptInterface(["regenerate", "1", "approve 1"])
         result = run_concept_art_review(state, MockConceptArtWorker(), pipeline_dir, ui, cfg)
         assert result == "approved"
         assert state.concept_arts[0].status == ConceptArtStatus.APPROVED
 
     def test_modify_then_approve(self, state, pipeline_dir, cfg):
         self._generate(state, pipeline_dir, cfg)
-        # "modify 1" triggers a follow-up ask for the instruction
-        ui = MockPromptInterface(["modify 1", "make it blue", "approve 1"])
+        # "modify" → which image? → version? (only v0 exists, skipped) → instruction
+        ui = MockPromptInterface(["modify", "1", "make it blue", "approve 1"])
         result = run_concept_art_review(state, MockConceptArtWorker(), pipeline_dir, ui, cfg)
         assert result == "approved"
 
@@ -357,11 +367,11 @@ class TestRunConceptArtReview:
         run_concept_art_review(state, MockConceptArtWorker(), pipeline_dir, ui, cfg)
         assert len(ui.shown_images) >= 1
 
-    def test_approve_moves_pipeline_to_mesh_generating(self, state, pipeline_dir, cfg):
+    def test_approve_keeps_pipeline_in_concept_art_review(self, state, pipeline_dir, cfg):
         self._generate(state, pipeline_dir, cfg)
         ui = MockPromptInterface(["approve 1"])
         run_concept_art_review(state, MockConceptArtWorker(), pipeline_dir, ui, cfg)
-        assert state.status == PipelineStatus.MESH_GENERATING
+        assert state.status == PipelineStatus.CONCEPT_ART_REVIEW
 
     def test_regenerate_all_regenerates_every_image(self, state, pipeline_dir, cfg):
         self._generate(state, pipeline_dir, cfg)  # initial generation via separate worker

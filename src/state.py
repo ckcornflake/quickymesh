@@ -1,14 +1,17 @@
 """
 Pydantic models for pipeline state.
 
-The entire state of one pipeline run is captured in PipelineState and can
-be round-tripped to/from a JSON file on disk.  Workers update sub-models
-(ConceptArtItem, MeshItem) and the top-level agent calls state.save() after
-each mutation.
+Two top-level state models exist:
 
-File location convention:
-    <output_root>/uncompleted_pipelines/<name>/state.json   (in progress)
-    <output_root>/completed_pipelines/<name>/state.json     (done / approved)
+PipelineState       — 2D pipeline (concept art generation / review).
+                      Saved at: <output_root>/pipelines/<name>/state.json
+
+Pipeline3DState     — 3D pipeline (mesh gen → texture → cleanup → screenshots
+                      → review → export).  May be linked to a 2D pipeline or
+                      submitted independently from an uploaded image.
+                      Saved at: <output_root>/pipelines/<name>/state.json
+                      where name is either "{2d_name}_{ca_idx}_{ca_ver}" (derived)
+                      or "u_{user_name}" (standalone upload).
 """
 
 from __future__ import annotations
@@ -28,12 +31,10 @@ from pydantic import BaseModel, Field
 
 
 class PipelineStatus(str, Enum):
+    """Status of a 2D (concept art) pipeline."""
     INITIALIZING = "initializing"
     CONCEPT_ART_GENERATING = "concept_art_generating"
-    CONCEPT_ART_REVIEW = "concept_art_review"
-    MESH_GENERATING = "mesh_generating"
-    MESH_REVIEW = "mesh_review"
-    APPROVED = "approved"
+    CONCEPT_ART_REVIEW = "concept_art_review"   # also the idle state
     CANCELLED = "cancelled"
     PAUSED = "paused"
 
@@ -42,13 +43,14 @@ class ConceptArtStatus(str, Enum):
     PENDING = "pending"
     GENERATING = "generating"
     READY = "ready"
-    APPROVED = "approved"       # approved for mesh generation
+    APPROVED = "approved"       # selected for mesh generation submission
     REGENERATING = "regenerating"
     MODIFIED = "modified"       # being modified via Gemini edit API
     REJECTED = "rejected"
 
 
-class MeshStatus(str, Enum):
+class Pipeline3DStatus(str, Enum):
+    """Status of a 3D (mesh generation) pipeline."""
     QUEUED = "queued"
     GENERATING_MESH = "generating_mesh"
     MESH_DONE = "mesh_done"
@@ -59,8 +61,8 @@ class MeshStatus(str, Enum):
     SCREENSHOT_PENDING = "screenshot_pending"
     SCREENSHOT_DONE = "screenshot_done"
     AWAITING_APPROVAL = "awaiting_approval"
-    APPROVED = "approved"
-    EXPORTED = "exported"
+    IDLE = "idle"               # exported; user can approve again for new version
+    CANCELLED = "cancelled"
 
 
 class SymmetryAxis(str, Enum):
@@ -81,29 +83,13 @@ class ConceptArtItem(BaseModel):
     """State for a single generated concept art image."""
 
     index: int
-    image_path: Optional[str] = None   # str so JSON serialises cleanly
+    version: int = 0                   # increments on each regen/modify/restyle
     status: ConceptArtStatus = ConceptArtStatus.PENDING
     prompts: list[str] = Field(default_factory=list)
 
-
-class MeshItem(BaseModel):
-    """State for one mesh derived from an approved concept art."""
-
-    concept_art_index: int
-    sub_name: str                       # e.g. "dragon_01_1"
-    status: MeshStatus = MeshStatus.QUEUED
-
-    # Paths (all optional until the relevant step completes)
-    mesh_path: Optional[str] = None
-    textured_mesh_path: Optional[str] = None
-    screenshot_dir: Optional[str] = None
-    review_sheet_path: Optional[str] = None
-    html_preview_path: Optional[str] = None
-
-    # Final export
-    final_name: Optional[str] = None
-    export_format: str = "glb"
-    export_path: Optional[str] = None
+    def image_filename(self) -> str:
+        """Derive the expected filename for the current version."""
+        return f"concept_art_{self.index + 1}_{self.version}.png"
 
 
 # ---------------------------------------------------------------------------
@@ -112,21 +98,21 @@ class MeshItem(BaseModel):
 
 
 class PipelineState(BaseModel):
-    """Complete, serialisable state for one pipeline run."""
+    """Complete, serialisable state for a 2D (concept art) pipeline."""
 
     name: str
     description: str
     input_image_path: Optional[str] = None   # user-supplied reference image
 
-    # Per-pipeline mesh settings (can be updated any time before mesh gen)
+    # Default mesh settings passed to any 3D pipeline spawned from this one
     num_polys: int
     symmetrize: bool = False
     symmetry_axis: SymmetryAxis = SymmetryAxis.X_MINUS
 
     status: PipelineStatus = PipelineStatus.INITIALIZING
+    hidden: bool = False
 
     concept_arts: list[ConceptArtItem] = Field(default_factory=list)
-    meshes: list[MeshItem] = Field(default_factory=list)
 
     # Which generator was used for concept art: "gemini" or "flux"
     concept_art_backend: str = "gemini"
@@ -182,8 +168,73 @@ class PipelineState(BaseModel):
     def ready_concept_arts(self) -> list[ConceptArtItem]:
         return [ca for ca in self.concept_arts if ca.status == ConceptArtStatus.READY]
 
-    def pending_mesh_approvals(self) -> list[MeshItem]:
-        return [m for m in self.meshes if m.status == MeshStatus.AWAITING_APPROVAL]
+
+# ---------------------------------------------------------------------------
+# 3D pipeline state
+# ---------------------------------------------------------------------------
+
+
+class Pipeline3DState(BaseModel):
+    """
+    Complete, serialisable state for a 3D (mesh generation) pipeline.
+
+    A 3D pipeline may originate from:
+      - A 2D pipeline concept art image (source_2d_pipeline is set).
+      - A user-uploaded image (source_2d_pipeline is None, name starts with "u_").
+
+    Folder name conventions:
+      Derived:   {2d_pipeline_name}_{ca_index}_{ca_version}   e.g. "hypership_1_0"
+      Uploaded:  u_{user_name}                                 e.g. "u_myship"
+    """
+
+    name: str
+    source_2d_pipeline: Optional[str] = None
+    source_concept_art_index: Optional[int] = None
+    source_concept_art_version: Optional[int] = None
+
+    # Absolute path to the source image on the server
+    input_image_path: str
+
+    num_polys: int
+    symmetrize: bool = False
+    symmetry_axis: SymmetryAxis = SymmetryAxis.X_MINUS
+    hidden: bool = False
+
+    status: Pipeline3DStatus = Pipeline3DStatus.QUEUED
+
+    # Paths set progressively as each step completes
+    mesh_path: Optional[str] = None
+    textured_mesh_path: Optional[str] = None
+    screenshot_dir: Optional[str] = None
+    review_sheet_path: Optional[str] = None
+    html_preview_path: Optional[str] = None
+
+    # Export tracking — export_version increments each time the user approves
+    export_version: int = 0
+    export_paths: list[str] = Field(default_factory=list)
+
+    # Relative path from output_root to this pipeline's folder
+    pipeline_dir: str
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def touch(self) -> None:
+        self.updated_at = datetime.now(timezone.utc)
+
+    def save(self, path: Path) -> None:
+        self.touch()
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    @classmethod
+    def load(cls, path: Path) -> "Pipeline3DState":
+        import json
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.model_validate(data)
 
 
 # ---------------------------------------------------------------------------

@@ -72,9 +72,10 @@ def create_app(
     app.state.restyle_worker = restyle_worker
 
     # Register routers
-    from src.api.routers import assets, events, pipelines, review, status
+    from src.api.routers import assets, events, pipelines, pipelines_3d, review, status
 
     app.include_router(pipelines.router, prefix="/api/v1")
+    app.include_router(pipelines_3d.router, prefix="/api/v1")
     app.include_router(review.router, prefix="/api/v1")
     app.include_router(assets.router, prefix="/api/v1")
     app.include_router(events.router, prefix="/api/v1")

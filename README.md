@@ -32,6 +32,8 @@ Multiple pipelines run concurrently. Background worker threads handle GPU work s
 | Blender | Included in the Docker image — nothing to install on the host. |
 | Disk | **~60 GB** free for Docker image (~20 GB) + model weights (~40 GB) |
 
+**Note on Blender path:** By default, the configuration points to a local Windows path for non-Docker users. For Docker users, this is handled internally via the container environment.
+
 **Windows users:** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and enable the WSL 2 backend. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU passthrough inside Docker.
 
 ---

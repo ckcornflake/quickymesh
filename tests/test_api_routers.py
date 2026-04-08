@@ -8,7 +8,6 @@ run.
 """
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -16,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import src.api.auth as auth_mod
 from src.api.app import create_app
@@ -25,8 +25,8 @@ from src.config import Config
 from src.state import (
     ConceptArtItem,
     ConceptArtStatus,
-    MeshItem,
-    MeshStatus,
+    Pipeline3DState,
+    Pipeline3DStatus,
     PipelineState,
     PipelineStatus,
 )
@@ -43,7 +43,6 @@ _AUTH = {"Authorization": f"Bearer {_API_KEY}"}
 
 @pytest.fixture
 def users_yaml(tmp_path) -> Path:
-    """Write a minimal users.yaml and return its path."""
     f = tmp_path / "users.yaml"
     f.write_text(
         f"users:\n"
@@ -95,10 +94,6 @@ def broker(cfg) -> Broker:
 
 @pytest.fixture
 def agent(cfg, broker):
-    """
-    A real PipelineAgent with mocked worker threads (never started).
-    Workers aren't started so no background threads run during tests.
-    """
     from src.agent.pipeline_agent import PipelineAgent
     from src.vram_arbiter import VRAMArbiter
     from src.workers.screenshot import MockScreenshotWorker
@@ -112,7 +107,6 @@ def agent(cfg, broker):
         trellis_worker=MockTrellisWorker(),
         screenshot_worker=MockScreenshotWorker(),
     )
-    # Inject fake threads so _show_status / status endpoint work
     a._threads = [MagicMock(is_alive=MagicMock(return_value=True),
                             __class__=MagicMock(__name__="FakeWorker"))]
     return a
@@ -120,7 +114,6 @@ def agent(cfg, broker):
 
 @pytest.fixture
 def client(agent, cfg, users_yaml):
-    """TestClient with the real FastAPI app wired to the test agent."""
     app = create_app(
         agent=agent,
         cfg=cfg,
@@ -142,9 +135,8 @@ def _seed_pipeline(
     name: str = "testpipe",
     status: PipelineStatus = PipelineStatus.CONCEPT_ART_GENERATING,
     concept_arts: list[ConceptArtItem] | None = None,
-    meshes: list[MeshItem] | None = None,
 ) -> PipelineState:
-    pipeline_dir = cfg.uncompleted_pipelines_dir / name
+    pipeline_dir = cfg.pipelines_dir / name
     pipeline_dir.mkdir(parents=True, exist_ok=True)
     state = PipelineState(
         name=name,
@@ -152,22 +144,49 @@ def _seed_pipeline(
         num_polys=8000,
         status=status,
         concept_arts=concept_arts or [],
-        meshes=meshes or [],
-        pipeline_dir=f"uncompleted_pipelines/{name}",
+        pipeline_dir=str(pipeline_dir.relative_to(cfg.output_root)),
     )
     state.save(pipeline_dir / "state.json")
     return state
 
 
-def _seed_concept_art_image(cfg: Config, name: str, idx: int) -> Path:
-    """Create a minimal 1×1 PNG so FileResponse can serve it."""
-    from PIL import Image
-    ca_dir = cfg.uncompleted_pipelines_dir / name / "concept_art"
+def _seed_concept_art_image(cfg: Config, name: str, idx: int, version: int = 0) -> Path:
+    """Create a minimal 1×1 PNG at the versioned path so FileResponse can serve it."""
+    ca_dir = cfg.pipelines_dir / name / "concept_art"
     ca_dir.mkdir(parents=True, exist_ok=True)
-    img_path = ca_dir / f"concept_art_{idx + 1}.png"
+    img_path = ca_dir / f"concept_art_{idx + 1}_{version}.png"
     img = Image.new("RGB", (1, 1), color=(255, 0, 0))
     img.save(str(img_path))
     return img_path
+
+
+def _seed_3d_pipeline(
+    cfg: Config,
+    name: str,
+    status: Pipeline3DStatus = Pipeline3DStatus.AWAITING_APPROVAL,
+    glb_content: bytes = b"glTF",
+) -> Pipeline3DState:
+    """Seed a 3D pipeline with a fake GLB file."""
+    pipeline_dir = cfg.pipelines_dir / name
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    # Create a fake input image
+    img_path = pipeline_dir / "input.png"
+    Image.new("RGB", (64, 64)).save(str(img_path))
+    # Create a fake GLB
+    glb_path = pipeline_dir / "meshes" / "textured.glb"
+    glb_path.parent.mkdir(parents=True, exist_ok=True)
+    glb_path.write_bytes(glb_content)
+
+    state = Pipeline3DState(
+        name=name,
+        input_image_path=str(img_path),
+        num_polys=8000,
+        status=status,
+        textured_mesh_path=str(glb_path),
+        pipeline_dir=str(pipeline_dir.relative_to(cfg.output_root)),
+    )
+    state.save(pipeline_dir / "state.json")
+    return state
 
 
 # ===========================================================================
@@ -222,7 +241,6 @@ class TestCreatePipeline:
         assert resp.status_code == 409
 
     def test_create_publishes_sse_event(self, client, cfg):
-        """Create should publish a pipeline_created event to the bus."""
         import asyncio
         loop = asyncio.new_event_loop()
         event_bus.set_loop(loop)
@@ -255,6 +273,14 @@ class TestListPipelines:
         names = [p["name"] for p in resp.json()]
         assert "pipe1" in names
         assert "pipe2" in names
+
+    def test_does_not_return_3d_pipelines(self, client, cfg):
+        _seed_pipeline(cfg, "twodpipe")
+        _seed_3d_pipeline(cfg, "threedpipe")
+        resp = client.get("/api/v1/pipelines", headers=_AUTH)
+        names = [p["name"] for p in resp.json()]
+        assert "twodpipe" in names
+        assert "threedpipe" not in names
 
 
 class TestGetPipeline:
@@ -294,9 +320,9 @@ class TestPatchPipeline:
         state = client.get("/api/v1/pipelines/polypipe", headers=_AUTH).json()
         assert state["num_polys"] == 12000
 
-    def test_patch_after_mesh_generating_returns_409(self, client, cfg):
-        _seed_pipeline(cfg, "latepipe", status=PipelineStatus.MESH_GENERATING)
-        resp = client.patch("/api/v1/pipelines/latepipe", headers=_AUTH,
+    def test_patch_cancelled_pipeline_returns_409(self, client, cfg):
+        _seed_pipeline(cfg, "cancelpipe", status=PipelineStatus.CANCELLED)
+        resp = client.patch("/api/v1/pipelines/cancelpipe", headers=_AUTH,
                             json={"num_polys": 5000})
         assert resp.status_code == 409
 
@@ -317,9 +343,10 @@ class TestPausePipeline:
 class TestRetryPipeline:
     def test_retry_resets_failed_tasks(self, client, cfg, broker):
         _seed_pipeline(cfg, "failpipe")
+        state_path = cfg.pipelines_dir / "failpipe" / "state.json"
         task_id = broker.enqueue("failpipe", "concept_art_generate",
                                  {"pipeline_name": "failpipe",
-                                  "state_path": str(cfg.uncompleted_pipelines_dir / "failpipe" / "state.json")})
+                                  "state_path": str(state_path)})
         broker.mark_failed(task_id, "test error")
         resp = client.post("/api/v1/pipelines/failpipe/retry", headers=_AUTH)
         assert resp.status_code == 200
@@ -331,53 +358,12 @@ class TestRetryPipeline:
 # ===========================================================================
 
 
-class TestConceptArtApprove:
-    def _make_state_with_ready_arts(self, cfg, name="artpipe"):
-        from src.concept_art_pipeline import generate_concept_arts
-        state = _seed_pipeline(cfg, name, status=PipelineStatus.CONCEPT_ART_REVIEW)
-        pipeline_dir = cfg.uncompleted_pipelines_dir / name
-        arts = [ConceptArtItem(index=0), ConceptArtItem(index=1)]
-        for art in arts:
-            img_path = _seed_concept_art_image(cfg, name, art.index)
-            art.image_path = str(img_path)
-            art.status = ConceptArtStatus.READY
-        state.concept_arts = arts
-        state.save(pipeline_dir / "state.json")
-        return state
-
-    def test_approve_queues_mesh_generation(self, client, cfg, broker):
-        self._make_state_with_ready_arts(cfg)
-        resp = client.post("/api/v1/pipelines/artpipe/concept_art/approve",
-                           headers=_AUTH, json={"indices": [0]})
-        assert resp.status_code == 200
-        tasks = broker.get_tasks(task_type="mesh_generate")
-        assert len(tasks) == 1
-
-    def test_approve_sets_status_approved(self, client, cfg):
-        self._make_state_with_ready_arts(cfg)
-        client.post("/api/v1/pipelines/artpipe/concept_art/approve",
-                    headers=_AUTH, json={"indices": [0, 1]})
-        state = client.get("/api/v1/pipelines/artpipe", headers=_AUTH).json()
-        assert state["status"] == "mesh_generating"
-        approved_arts = [ca for ca in state["concept_arts"]
-                         if ca["status"] == "approved"]
-        assert len(approved_arts) == 2
-
-    def test_approve_out_of_range_index_returns_422(self, client, cfg):
-        self._make_state_with_ready_arts(cfg)
-        resp = client.post("/api/v1/pipelines/artpipe/concept_art/approve",
-                           headers=_AUTH, json={"indices": [99]})
-        assert resp.status_code == 422
-
-
 class TestConceptArtRegenerate:
     def _make_state(self, cfg, name="regenpipe"):
         arts = []
         for i in range(2):
-            img_path = _seed_concept_art_image(cfg, name, i)
-            arts.append(ConceptArtItem(
-                index=i, image_path=str(img_path), status=ConceptArtStatus.READY
-            ))
+            _seed_concept_art_image(cfg, name, i)
+            arts.append(ConceptArtItem(index=i, status=ConceptArtStatus.READY))
         _seed_pipeline(cfg, name, status=PipelineStatus.CONCEPT_ART_REVIEW,
                        concept_arts=arts)
 
@@ -407,9 +393,8 @@ class TestConceptArtRegenerate:
 
 class TestConceptArtModify:
     def _make_state_with_image(self, cfg, name="modpipe"):
-        img_path = _seed_concept_art_image(cfg, name, 0)
-        arts = [ConceptArtItem(index=0, image_path=str(img_path),
-                               status=ConceptArtStatus.READY)]
+        _seed_concept_art_image(cfg, name, 0)
+        arts = [ConceptArtItem(index=0, status=ConceptArtStatus.READY)]
         _seed_pipeline(cfg, name, status=PipelineStatus.CONCEPT_ART_REVIEW,
                        concept_arts=arts)
 
@@ -421,7 +406,6 @@ class TestConceptArtModify:
         assert resp.status_code == 200
 
     def test_modify_with_non_supporting_worker_returns_409(self, client, cfg, agent, users_yaml):
-        """When the concept_worker.supports_modify is False, should get 409."""
         from src.workers.concept_art import FluxComfyUIConceptArtWorker
         mock_flux = MagicMock(spec=FluxComfyUIConceptArtWorker)
         mock_flux.supports_modify = False
@@ -451,9 +435,8 @@ class TestConceptArtModify:
 
 class TestConceptArtDownload:
     def test_download_existing_image_returns_png(self, client, cfg):
-        img_path = _seed_concept_art_image(cfg, "dlpipe", 0)
-        arts = [ConceptArtItem(index=0, image_path=str(img_path),
-                               status=ConceptArtStatus.READY)]
+        _seed_concept_art_image(cfg, "dlpipe", 0)
+        arts = [ConceptArtItem(index=0, status=ConceptArtStatus.READY)]
         _seed_pipeline(cfg, "dlpipe", status=PipelineStatus.CONCEPT_ART_REVIEW,
                        concept_arts=arts)
         resp = client.get("/api/v1/pipelines/dlpipe/concept_art/0", headers=_AUTH)
@@ -463,139 +446,6 @@ class TestConceptArtDownload:
     def test_download_missing_index_returns_404(self, client, cfg):
         _seed_pipeline(cfg, "dlpipe2")
         resp = client.get("/api/v1/pipelines/dlpipe2/concept_art/5", headers=_AUTH)
-        assert resp.status_code == 404
-
-
-# ===========================================================================
-# Mesh review
-# ===========================================================================
-
-
-def _seed_mesh_review_state(cfg: Config, name: str = "meshpipe") -> PipelineState:
-    """Create a pipeline with one mesh in AWAITING_APPROVAL state."""
-    pipeline_dir = cfg.uncompleted_pipelines_dir / name
-    pipeline_dir.mkdir(parents=True, exist_ok=True)
-    mesh_dir = pipeline_dir / f"{name}_1" / "meshes"
-    mesh_dir.mkdir(parents=True, exist_ok=True)
-    glb_path = mesh_dir / "textured.glb"
-    glb_path.write_bytes(b"GLB")  # fake file
-
-    state = PipelineState(
-        name=name,
-        description="a dragon",
-        num_polys=8000,
-        status=PipelineStatus.MESH_REVIEW,
-        concept_arts=[ConceptArtItem(index=0, status=ConceptArtStatus.APPROVED)],
-        meshes=[MeshItem(
-            concept_art_index=0,
-            sub_name=f"{name}_1",
-            status=MeshStatus.AWAITING_APPROVAL,
-            textured_mesh_path=str(glb_path),
-        )],
-        pipeline_dir=f"uncompleted_pipelines/{name}",
-    )
-    state.save(pipeline_dir / "state.json")
-    return state
-
-
-class TestMeshApprove:
-    def test_approve_marks_mesh_approved(self, client, cfg):
-        _seed_mesh_review_state(cfg)
-        resp = client.post(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/approve",
-            headers=_AUTH,
-            json={"asset_name": "my_dragon"},
-        )
-        assert resp.status_code == 200
-        # After approval the pipeline is exported and moved to completed_pipelines.
-        # Verify the export landed in final_assets_dir.
-        exported = cfg.final_assets_dir / "my_dragon" / "mesh.glb"
-        assert exported.exists()
-
-    def test_approve_non_awaiting_returns_409(self, client, cfg):
-        # Use a different pipeline name to avoid collision with the approve test
-        _seed_mesh_review_state(cfg, name="meshpipe409")
-        state = PipelineState.load(cfg.uncompleted_pipelines_dir / "meshpipe409" / "state.json")
-        state.meshes[0].status = MeshStatus.APPROVED
-        state.save(cfg.uncompleted_pipelines_dir / "meshpipe409" / "state.json")
-        resp = client.post(
-            "/api/v1/pipelines/meshpipe409/meshes/meshpipe409_1/approve",
-            headers=_AUTH,
-            json={"asset_name": "my_dragon"},
-        )
-        assert resp.status_code == 409
-
-    def test_approve_missing_mesh_returns_404(self, client, cfg):
-        _seed_mesh_review_state(cfg, name="meshpipe404")
-        resp = client.post(
-            "/api/v1/pipelines/meshpipe404/meshes/nonexistent_1/approve",
-            headers=_AUTH,
-            json={"asset_name": "ghost"},
-        )
-        assert resp.status_code == 404
-
-
-
-
-class TestMeshReject:
-    def test_reject_marks_mesh_queued(self, client, cfg):
-        _seed_mesh_review_state(cfg)
-        resp = client.post(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/reject",
-            headers=_AUTH,
-            json={},
-        )
-        assert resp.status_code == 200
-        state = client.get("/api/v1/pipelines/meshpipe", headers=_AUTH).json()
-        assert state["meshes"][0]["status"] == "queued"
-
-    def test_reject_updates_num_polys(self, client, cfg):
-        _seed_mesh_review_state(cfg)
-        client.post(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/reject",
-            headers=_AUTH,
-            json={"num_polys": 5000},
-        )
-        state = client.get("/api/v1/pipelines/meshpipe", headers=_AUTH).json()
-        assert state["num_polys"] == 5000
-
-    def test_reject_updates_symmetry(self, client, cfg):
-        _seed_mesh_review_state(cfg)
-        client.post(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/reject",
-            headers=_AUTH,
-            json={"symmetrize": True, "symmetry_axis": "x-"},
-        )
-        state = client.get("/api/v1/pipelines/meshpipe", headers=_AUTH).json()
-        assert state["symmetrize"] is True
-        assert state["symmetry_axis"] == "x-"
-
-    def test_reject_requeues_mesh_generation_when_all_rejected(self, client, cfg, broker):
-        _seed_mesh_review_state(cfg)
-        client.post(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/reject",
-            headers=_AUTH,
-            json={},
-        )
-        tasks = broker.get_tasks(task_type="mesh_generate")
-        assert len(tasks) == 1
-
-
-class TestMeshDownloads:
-    def test_download_glb_returns_binary(self, client, cfg):
-        _seed_mesh_review_state(cfg)
-        resp = client.get(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/mesh",
-            headers=_AUTH,
-        )
-        assert resp.status_code == 200
-
-    def test_download_missing_screenshot_returns_404(self, client, cfg):
-        _seed_mesh_review_state(cfg)
-        resp = client.get(
-            "/api/v1/pipelines/meshpipe/meshes/meshpipe_1/screenshot/front.png",
-            headers=_AUTH,
-        )
         assert resp.status_code == 404
 
 
@@ -651,14 +501,13 @@ class TestStatus:
 
 
 # ===========================================================================
-# Coverage gap: pipelines.py — resume success, patch symmetry fields
+# Resume / Pause
 # ===========================================================================
 
 
 class TestResumePipeline:
     def test_resume_paused_pipeline_succeeds(self, client, cfg):
         _seed_pipeline(cfg, "pausedpipe", status=PipelineStatus.PAUSED)
-        # Resume should succeed (200) for a paused pipeline
         resp = client.post("/api/v1/pipelines/pausedpipe/resume", headers=_AUTH)
         assert resp.status_code == 200
 
@@ -685,15 +534,14 @@ class TestPatchSymmetry:
 
 
 # ===========================================================================
-# Coverage gap: review.py — concept art sheet endpoint
+# Concept art sheet endpoint
 # ===========================================================================
 
 
 class TestConceptArtSheet:
     def test_sheet_endpoint_with_ready_images_returns_png(self, client, cfg):
-        img_path = _seed_concept_art_image(cfg, "sheetpipe", 0)
-        arts = [ConceptArtItem(index=0, image_path=str(img_path),
-                               status=ConceptArtStatus.READY)]
+        _seed_concept_art_image(cfg, "sheetpipe", 0)
+        arts = [ConceptArtItem(index=0, status=ConceptArtStatus.READY)]
         _seed_pipeline(cfg, "sheetpipe", status=PipelineStatus.CONCEPT_ART_REVIEW,
                        concept_arts=arts)
         resp = client.get("/api/v1/pipelines/sheetpipe/concept_art/sheet", headers=_AUTH)
@@ -701,7 +549,6 @@ class TestConceptArtSheet:
         assert resp.headers["content-type"] == "image/png"
 
     def test_sheet_endpoint_with_no_images_returns_409(self, client, cfg):
-        # Pipeline with no concept arts — build_review_sheet raises ValueError
         _seed_pipeline(cfg, "emptypipe", status=PipelineStatus.CONCEPT_ART_REVIEW)
         resp = client.get("/api/v1/pipelines/emptypipe/concept_art/sheet", headers=_AUTH)
         assert resp.status_code == 409
@@ -712,8 +559,7 @@ class TestConceptArtSheet:
 
 
 class TestConceptArtImageEdgeCases:
-    def test_image_path_not_set_returns_404(self, client, cfg):
-        """ConceptArtItem exists but image_path is None (still generating)."""
+    def test_image_file_not_yet_generated_returns_404(self, client, cfg):
         arts = [ConceptArtItem(index=0, status=ConceptArtStatus.GENERATING)]
         _seed_pipeline(cfg, "genpipe", status=PipelineStatus.CONCEPT_ART_GENERATING,
                        concept_arts=arts)
@@ -723,25 +569,22 @@ class TestConceptArtImageEdgeCases:
     def test_negative_index_returns_404(self, client, cfg):
         _seed_pipeline(cfg, "negpipe")
         resp = client.get("/api/v1/pipelines/negpipe/concept_art/-1", headers=_AUTH)
-        # FastAPI will reject -1 as an int path param or return 404
         assert resp.status_code in (404, 422)
 
 
 # ===========================================================================
-# Coverage gap: review.py — restyle endpoint
+# Restyle endpoint
 # ===========================================================================
 
 
 class TestRestyleConceptArt:
     def _make_state(self, cfg, name="restylepipe"):
-        img_path = _seed_concept_art_image(cfg, name, 0)
-        arts = [ConceptArtItem(index=0, image_path=str(img_path),
-                               status=ConceptArtStatus.READY)]
+        _seed_concept_art_image(cfg, name, 0)
+        arts = [ConceptArtItem(index=0, status=ConceptArtStatus.READY)]
         _seed_pipeline(cfg, name, status=PipelineStatus.CONCEPT_ART_REVIEW,
                        concept_arts=arts)
 
     def test_restyle_without_worker_returns_409(self, client, cfg):
-        # The default test client has restyle_worker=None
         self._make_state(cfg)
         resp = client.post("/api/v1/pipelines/restylepipe/concept_art/restyle",
                            headers=_AUTH, json={
@@ -751,7 +594,6 @@ class TestRestyleConceptArt:
         assert resp.status_code == 409
 
     def test_restyle_with_worker_returns_200(self, client, cfg, agent, users_yaml):
-        """Wire a mock restyle worker into the app."""
         mock_restyle = MagicMock()
         mock_restyle.restyle_image = MagicMock(
             return_value=open(str(_seed_concept_art_image(cfg, "rw2pipe", 0)), "rb").read()
@@ -783,350 +625,169 @@ class TestRestyleConceptArt:
 
 
 # ===========================================================================
-# Coverage gap: review.py — mesh download 404 paths
+# 3D pipeline endpoints
 # ===========================================================================
 
 
-class TestMeshDownload404s:
-    def test_review_sheet_not_generated_returns_404(self, client, cfg):
-        _seed_mesh_review_state(cfg, name="nosheetpipe")
-        resp = client.get(
-            "/api/v1/pipelines/nosheetpipe/meshes/nosheetpipe_1/sheet",
-            headers=_AUTH,
-        )
+class TestList3DPipelines:
+    def test_empty_returns_empty_list(self, client):
+        resp = client.get("/api/v1/3d-pipelines", headers=_AUTH)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_returns_seeded_3d_pipeline(self, client, cfg):
+        _seed_3d_pipeline(cfg, "ship3d")
+        resp = client.get("/api/v1/3d-pipelines", headers=_AUTH)
+        names = [p["name"] for p in resp.json()]
+        assert "ship3d" in names
+
+    def test_does_not_return_2d_pipelines(self, client, cfg):
+        _seed_pipeline(cfg, "twodpipe")
+        resp = client.get("/api/v1/3d-pipelines", headers=_AUTH)
+        names = [p["name"] for p in resp.json()]
+        assert "twodpipe" not in names
+
+
+class TestGet3DPipeline:
+    def test_returns_state(self, client, cfg):
+        _seed_3d_pipeline(cfg, "myship3d")
+        resp = client.get("/api/v1/3d-pipelines/myship3d", headers=_AUTH)
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "myship3d"
+
+    def test_missing_returns_404(self, client):
+        resp = client.get("/api/v1/3d-pipelines/ghost", headers=_AUTH)
         assert resp.status_code == 404
 
-    def test_preview_not_generated_returns_404(self, client, cfg):
-        _seed_mesh_review_state(cfg, name="nopreviewpipe")
-        resp = client.get(
-            "/api/v1/pipelines/nopreviewpipe/meshes/nopreviewpipe_1/preview",
-            headers=_AUTH,
-        )
+
+class TestCancel3DPipeline:
+    def test_cancel_sets_cancelled(self, client, cfg):
+        _seed_3d_pipeline(cfg, "cancelship")
+        client.delete("/api/v1/3d-pipelines/cancelship", headers=_AUTH)
+        state = client.get("/api/v1/3d-pipelines/cancelship", headers=_AUTH).json()
+        assert state["status"] == "cancelled"
+
+    def test_cancel_missing_returns_404(self, client):
+        assert client.delete("/api/v1/3d-pipelines/ghost", headers=_AUTH).status_code == 404
+
+
+class TestCreate3DPipelineFromRef:
+    def _setup_2d(self, cfg, name="mypipe"):
+        """Seed a 2D pipeline with one approved concept art image."""
+        ca_dir = cfg.pipelines_dir / name / "concept_art"
+        ca_dir.mkdir(parents=True, exist_ok=True)
+        img_path = ca_dir / "concept_art_1_0.png"
+        Image.new("RGB", (64, 64)).save(str(img_path))
+        arts = [ConceptArtItem(index=0, status=ConceptArtStatus.APPROVED, version=0)]
+        _seed_pipeline(cfg, name, status=PipelineStatus.CONCEPT_ART_REVIEW, concept_arts=arts)
+        return name
+
+    def test_creates_3d_pipeline(self, client, cfg):
+        self._setup_2d(cfg)
+        resp = client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={
+            "pipeline_name": "mypipe",
+            "concept_art_index": 0,
+        })
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "queued"
+
+    def test_missing_2d_pipeline_returns_404(self, client, cfg):
+        resp = client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={
+            "pipeline_name": "ghost",
+            "concept_art_index": 0,
+        })
         assert resp.status_code == 404
 
-    def test_mesh_file_no_glb_returns_404(self, client, cfg):
-        """Seed a pipeline where the textured_mesh_path points to a missing file."""
-        name = "noglbpipe"
-        pipeline_dir = cfg.uncompleted_pipelines_dir / name
-        pipeline_dir.mkdir(parents=True, exist_ok=True)
-        state = PipelineState(
-            name=name,
-            description="test",
-            num_polys=8000,
-            status=PipelineStatus.MESH_REVIEW,
-            concept_arts=[ConceptArtItem(index=0, status=ConceptArtStatus.APPROVED)],
-            meshes=[MeshItem(
-                concept_art_index=0,
-                sub_name=f"{name}_1",
-                status=MeshStatus.AWAITING_APPROVAL,
-                textured_mesh_path="/nonexistent/path.glb",
-            )],
-            pipeline_dir=f"uncompleted_pipelines/{name}",
-        )
-        state.save(pipeline_dir / "state.json")
-        resp = client.get(
-            f"/api/v1/pipelines/{name}/meshes/{name}_1/mesh",
-            headers=_AUTH,
-        )
-        assert resp.status_code == 404
+    def test_out_of_range_index_returns_422(self, client, cfg):
+        self._setup_2d(cfg)
+        resp = client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={
+            "pipeline_name": "mypipe",
+            "concept_art_index": 99,
+        })
+        assert resp.status_code == 422
 
-    def test_screenshot_file_missing_returns_404(self, client, cfg):
-        """screenshot_dir set but the specific file doesn't exist."""
-        name = "screenpipe"
-        pipeline_dir = cfg.uncompleted_pipelines_dir / name
-        screenshot_dir = pipeline_dir / f"{name}_1" / "screenshots"
-        screenshot_dir.mkdir(parents=True, exist_ok=True)
-        glb_path = pipeline_dir / f"{name}_1" / "meshes" / "textured.glb"
-        glb_path.parent.mkdir(parents=True, exist_ok=True)
-        glb_path.write_bytes(b"GLB")
-        state = PipelineState(
-            name=name,
-            description="test",
-            num_polys=8000,
-            status=PipelineStatus.MESH_REVIEW,
-            concept_arts=[ConceptArtItem(index=0, status=ConceptArtStatus.APPROVED)],
-            meshes=[MeshItem(
-                concept_art_index=0,
-                sub_name=f"{name}_1",
-                status=MeshStatus.AWAITING_APPROVAL,
-                textured_mesh_path=str(glb_path),
-                screenshot_dir=str(screenshot_dir),
-            )],
-            pipeline_dir=f"uncompleted_pipelines/{name}",
-        )
-        state.save(pipeline_dir / "state.json")
-        resp = client.get(
-            f"/api/v1/pipelines/{name}/meshes/{name}_1/screenshot/missing.png",
-            headers=_AUTH,
-        )
-        assert resp.status_code == 404
-
-    def test_screenshot_with_existing_file_returns_200(self, client, cfg):
-        """screenshot_dir set and the file exists."""
-        from PIL import Image
-        name = "screenpipe2"
-        pipeline_dir = cfg.uncompleted_pipelines_dir / name
-        screenshot_dir = pipeline_dir / f"{name}_1" / "screenshots"
-        screenshot_dir.mkdir(parents=True, exist_ok=True)
-        glb_path = pipeline_dir / f"{name}_1" / "meshes" / "textured.glb"
-        glb_path.parent.mkdir(parents=True, exist_ok=True)
-        glb_path.write_bytes(b"GLB")
-        img = Image.new("RGB", (1, 1))
-        img.save(str(screenshot_dir / "front.png"))
-        state = PipelineState(
-            name=name,
-            description="test",
-            num_polys=8000,
-            status=PipelineStatus.MESH_REVIEW,
-            concept_arts=[ConceptArtItem(index=0, status=ConceptArtStatus.APPROVED)],
-            meshes=[MeshItem(
-                concept_art_index=0,
-                sub_name=f"{name}_1",
-                status=MeshStatus.AWAITING_APPROVAL,
-                textured_mesh_path=str(glb_path),
-                screenshot_dir=str(screenshot_dir),
-            )],
-            pipeline_dir=f"uncompleted_pipelines/{name}",
-        )
-        state.save(pipeline_dir / "state.json")
-        resp = client.get(
-            f"/api/v1/pipelines/{name}/meshes/{name}_1/screenshot/front.png",
-            headers=_AUTH,
-        )
-        assert resp.status_code == 200
-
-
-# ===========================================================================
-# Coverage gap: review.py — approve/reject with multiple meshes
-# ===========================================================================
-
-
-def _seed_two_mesh_review_state(cfg: Config, name: str = "twomeshpipe") -> PipelineState:
-    """Two meshes both AWAITING_APPROVAL."""
-    pipeline_dir = cfg.uncompleted_pipelines_dir / name
-    meshes = []
-    for i in range(1, 3):
-        mesh_dir = pipeline_dir / f"{name}_{i}" / "meshes"
-        mesh_dir.mkdir(parents=True, exist_ok=True)
-        glb = mesh_dir / "textured.glb"
-        glb.write_bytes(b"GLB")
-        meshes.append(MeshItem(
-            concept_art_index=i - 1,
-            sub_name=f"{name}_{i}",
-            status=MeshStatus.AWAITING_APPROVAL,
-            textured_mesh_path=str(glb),
-        ))
-    state = PipelineState(
-        name=name,
-        description="test",
-        num_polys=8000,
-        status=PipelineStatus.MESH_REVIEW,
-        concept_arts=[
-            ConceptArtItem(index=0, status=ConceptArtStatus.APPROVED),
-            ConceptArtItem(index=1, status=ConceptArtStatus.APPROVED),
-        ],
-        meshes=meshes,
-        pipeline_dir=f"uncompleted_pipelines/{name}",
-    )
-    state.save(pipeline_dir / "state.json")
-    return state
-
-
-class TestMeshApproveMultiple:
-    def test_approve_one_of_two_does_not_export_yet(self, client, cfg):
-        """Approving one mesh with another still pending should not trigger export."""
-        _seed_two_mesh_review_state(cfg)
-        resp = client.post(
-            "/api/v1/pipelines/twomeshpipe/meshes/twomeshpipe_1/approve",
-            headers=_AUTH,
-            json={"asset_name": "first_ship"},
-        )
-        assert resp.status_code == 200
-        # Pipeline still exists in uncompleted (not moved to completed yet)
-        state = client.get("/api/v1/pipelines/twomeshpipe", headers=_AUTH).json()
-        assert state["status"] == "mesh_review"
-
-    def test_reject_one_of_two_keeps_other_pending(self, client, cfg):
-        """Rejecting one mesh while another is still pending — both remain in review."""
-        _seed_two_mesh_review_state(cfg, name="twomesh2")
-        resp = client.post(
-            "/api/v1/pipelines/twomesh2/meshes/twomesh2_1/reject",
-            headers=_AUTH, json={},
-        )
-        assert resp.status_code == 200
-        state = client.get("/api/v1/pipelines/twomesh2", headers=_AUTH).json()
-        # Status should still be mesh_review (one remaining)
-        assert state["status"] == "mesh_review"
-
-    def test_approve_then_reject_other_triggers_export(self, client, cfg):
-        """Approve mesh 1, reject mesh 2 → export runs with 1 approved mesh."""
-        _seed_two_mesh_review_state(cfg, name="mixmesh")
-        client.post("/api/v1/pipelines/mixmesh/meshes/mixmesh_1/approve",
-                    headers=_AUTH, json={"asset_name": "approved_ship"})
-        resp = client.post("/api/v1/pipelines/mixmesh/meshes/mixmesh_2/reject",
-                           headers=_AUTH, json={})
-        assert resp.status_code == 200
-        exported = cfg.final_assets_dir / "approved_ship" / "mesh.glb"
-        assert exported.exists()
-
-
-class TestMeshRejectEdgeCases:
-    def test_reject_non_awaiting_returns_409(self, client, cfg):
-        name = "rejpipe409"
-        state = _seed_mesh_review_state(cfg, name=name)
-        state.meshes[0].status = MeshStatus.QUEUED
-        state.save(cfg.uncompleted_pipelines_dir / name / "state.json")
-        resp = client.post(
-            f"/api/v1/pipelines/{name}/meshes/{name}_1/reject",
-            headers=_AUTH, json={},
-        )
+    def test_duplicate_3d_name_returns_409(self, client, cfg):
+        self._setup_2d(cfg)
+        client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={
+            "pipeline_name": "mypipe",
+            "concept_art_index": 0,
+        })
+        resp = client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={
+            "pipeline_name": "mypipe",
+            "concept_art_index": 0,
+        })
         assert resp.status_code == 409
 
 
-# ===========================================================================
-# Coverage gap: SSE endpoints — connect and content-type
-# ===========================================================================
+class TestApprove3DMesh:
+    def test_approve_awaiting_approval_succeeds(self, client, cfg):
+        _seed_3d_pipeline(cfg, "approveship", status=Pipeline3DStatus.AWAITING_APPROVAL)
+        resp = client.post("/api/v1/3d-pipelines/approveship/approve", headers=_AUTH,
+                           json={"asset_name": "my_ship"})
+        assert resp.status_code == 200
+
+    def test_approve_wrong_status_returns_409(self, client, cfg):
+        _seed_3d_pipeline(cfg, "notreadyship", status=Pipeline3DStatus.QUEUED)
+        resp = client.post("/api/v1/3d-pipelines/notreadyship/approve", headers=_AUTH,
+                           json={"asset_name": "bad"})
+        assert resp.status_code == 409
+
+    def test_approve_missing_returns_404(self, client):
+        resp = client.post("/api/v1/3d-pipelines/ghost/approve", headers=_AUTH,
+                           json={"asset_name": "x"})
+        assert resp.status_code == 404
 
 
-class TestSSEEndpoints:
-    """
-    SSE endpoints return an infinite stream, so we can't use client.get()
-    (it would hang waiting for the response body to complete).  We test
-    auth rejection with a normal GET (FastAPI rejects before touching the
-    stream), and verify content-type via the router registration.
-    The generator internals are tested directly in TestSSEGenerator below.
-    """
+class TestReject3DMesh:
+    def test_reject_requeues_mesh_generation(self, client, cfg, broker):
+        _seed_3d_pipeline(cfg, "rejectship", status=Pipeline3DStatus.AWAITING_APPROVAL)
+        resp = client.post("/api/v1/3d-pipelines/rejectship/reject", headers=_AUTH,
+                           json={})
+        assert resp.status_code == 200
+        tasks = broker.get_tasks(task_type="mesh_generate")
+        assert len(tasks) == 1
 
-    def test_pipeline_events_requires_auth(self, client, cfg):
-        _seed_pipeline(cfg, "authpipe")
-        resp = client.get("/api/v1/pipelines/authpipe/events")
-        assert resp.status_code == 401
+    def test_reject_updates_num_polys(self, client, cfg):
+        _seed_3d_pipeline(cfg, "rejectship2", status=Pipeline3DStatus.AWAITING_APPROVAL)
+        client.post("/api/v1/3d-pipelines/rejectship2/reject", headers=_AUTH,
+                    json={"num_polys": 4000})
+        state = client.get("/api/v1/3d-pipelines/rejectship2", headers=_AUTH).json()
+        assert state["num_polys"] == 4000
 
-    def test_global_events_requires_auth(self, client):
-        resp = client.get("/api/v1/events")
-        assert resp.status_code == 401
-
-    def test_pipeline_events_missing_auth_returns_401(self, client, cfg):
-        _seed_pipeline(cfg, "authpipe2")
-        resp = client.get("/api/v1/pipelines/authpipe2/events",
-                          headers={"Authorization": "Bearer bad-key"})
-        assert resp.status_code == 401
-
-    def test_global_events_missing_auth_returns_401(self, client):
-        resp = client.get("/api/v1/events",
-                          headers={"Authorization": "Bearer bad-key"})
-        assert resp.status_code == 401
+    def test_reject_wrong_status_returns_409(self, client, cfg):
+        _seed_3d_pipeline(cfg, "queuedship", status=Pipeline3DStatus.QUEUED)
+        resp = client.post("/api/v1/3d-pipelines/queuedship/reject", headers=_AUTH,
+                           json={})
+        assert resp.status_code == 409
 
 
-# ===========================================================================
-# Coverage gap: SSE generator logic (tested directly, not via HTTP)
-# ===========================================================================
+class Test3DPipelineDownloads:
+    def test_mesh_endpoint_returns_binary(self, client, cfg):
+        _seed_3d_pipeline(cfg, "dlship", status=Pipeline3DStatus.AWAITING_APPROVAL)
+        resp = client.get("/api/v1/3d-pipelines/dlship/mesh", headers=_AUTH)
+        assert resp.status_code == 200
 
+    def test_mesh_not_yet_generated_returns_404(self, client, cfg):
+        state = _seed_3d_pipeline(cfg, "nomeshship", status=Pipeline3DStatus.QUEUED)
+        # Remove textured_mesh_path that _seed_3d_pipeline sets
+        state.textured_mesh_path = None
+        state.mesh_path = None
+        state.save(cfg.pipelines_dir / "nomeshship" / "state.json")
+        resp = client.get("/api/v1/3d-pipelines/nomeshship/mesh", headers=_AUTH)
+        assert resp.status_code == 404
 
-class TestSSEGenerator:
-    def test_generator_yields_event_from_queue(self):
-        """Generator yields event data when queue has an item."""
-        import asyncio
-        from src.api.routers.events import _event_generator
+    def test_sheet_not_generated_returns_404(self, client, cfg):
+        _seed_3d_pipeline(cfg, "nosheetship")
+        resp = client.get("/api/v1/3d-pipelines/nosheetship/sheet", headers=_AUTH)
+        assert resp.status_code == 404
 
-        async def run():
-            q = asyncio.Queue()
-            await q.put({"event": "ping", "pipeline": "test"})
-            # Cancel after first yield so the generator doesn't loop forever
-            gen = _event_generator(q, "test")
-            result = await gen.__anext__()
-            await gen.aclose()
-            return result
+    def test_preview_not_generated_returns_404(self, client, cfg):
+        _seed_3d_pipeline(cfg, "nopreviewship")
+        resp = client.get("/api/v1/3d-pipelines/nopreviewship/preview", headers=_AUTH)
+        assert resp.status_code == 404
 
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(run())
-        loop.close()
-
-        import json
-        data = json.loads(result["data"])
-        assert data["event"] == "ping"
-
-    def test_generator_yields_heartbeat_on_timeout(self):
-        """Generator yields heartbeat when queue is empty for the timeout window."""
-        import asyncio
-        from src.api.routers.events import _event_generator
-
-        async def run():
-            q = asyncio.Queue()
-            # Use a very short timeout by patching the module constant
-            import src.api.routers.events as events_mod
-            original = events_mod._HEARTBEAT_INTERVAL
-            events_mod._HEARTBEAT_INTERVAL = 0.05
-            try:
-                gen = _event_generator(q, None)
-                result = await gen.__anext__()
-                await gen.aclose()
-                return result
-            finally:
-                events_mod._HEARTBEAT_INTERVAL = original
-
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(run())
-        loop.close()
-
-        import json
-        data = json.loads(result["data"])
-        assert data["event"] == "heartbeat"
-
-    def test_generator_unsubscribes_on_close(self):
-        """Generator's finally block removes the queue from the event bus."""
-        import asyncio
-        from src.api.routers.events import _event_generator
-        from src.api.event_bus import event_bus
-
-        loop = asyncio.new_event_loop()
-        event_bus.set_loop(loop)
-
-        async def run():
-            q = event_bus.subscribe(pipeline_name="closepipe")
-            # Put an item in so the first __anext__() returns immediately
-            # (generator must be entered before finally runs on aclose)
-            await q.put({"event": "ping"})
-            gen = _event_generator(q, "closepipe")
-            await gen.__anext__()  # enters the try block
-            await gen.aclose()    # triggers finally → unsubscribe
-            return q
-
-        q = loop.run_until_complete(run())
-        loop.close()
-        assert q not in event_bus._pipeline_subs.get("closepipe", set())
-
-
-# ===========================================================================
-# Coverage gap: event_bus.py — publish with full queue / closed loop
-# ===========================================================================
-
-
-class TestEventBusEdgeCases:
-    def test_publish_drops_event_when_queue_is_full(self):
-        """publish() should not raise even if the queue is full (maxsize=1)."""
-        import asyncio
-        from src.api.event_bus import EventBus
-
-        bus = EventBus()
-        loop = asyncio.new_event_loop()
-        bus.set_loop(loop)
-
-        # Create a tiny queue (maxsize=1) and fill it
-        q = asyncio.Queue(maxsize=1)
-        with bus._lock:
-            bus._global_subs.add(q)
-
-        # Fill the queue from the loop thread
-        loop.run_until_complete(q.put({"event": "first"}))
-
-        # Now publish — queue is full, put_nowait will raise; should be swallowed
-        bus.publish({"event": "overflow"})
-        # Give the loop a tick to process the call_soon_threadsafe
-        loop.run_until_complete(asyncio.sleep(0.01))
-
-        # Queue still has the original item, not the overflow
-        assert q.qsize() == 1
-        event = loop.run_until_complete(q.get())
-        assert event["event"] == "first"
-        loop.close()
+    def test_screenshot_missing_file_returns_404(self, client, cfg):
+        _seed_3d_pipeline(cfg, "screenshotship")
+        resp = client.get("/api/v1/3d-pipelines/screenshotship/screenshot/front.png",
+                          headers=_AUTH)
+        assert resp.status_code == 404

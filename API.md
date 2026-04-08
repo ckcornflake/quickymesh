@@ -180,9 +180,83 @@ Resumes a paused pipeline.
 
 ### `POST /api/v1/pipelines/{name}/retry` — Retry failed tasks
 
-Resets failed broker tasks so workers will pick them up again.
+Resets failed broker tasks so workers will pick up again.
 
 **Response:** `{"status": "ok", "tasks_reset": 2}`
+
+---
+
+## 3D Pipelines
+These endpoints handle 3D mesh generation, which can be triggered from 2D pipeline references or direct image uploads.
+
+### `POST /api/v1/3d-pipelines/from-ref` — Create from 2D reference
+Start a 3D pipeline using an existing 2D pipeline's concept art.
+
+**Request body:**
+```json
+{
+  "pipeline_name": "red_dragon",
+  "concept_art_index": 0,
+  "concept_art_version": "1",
+  "num_polys": 8000,
+  "symmetrize": true,
+  "symmetry_axis": "x-"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `pipeline_name` | string | Yes | Name of the source 2D pipeline. |
+| `concept_art_index` | int | Yes | 0-based index of the concept art. |
+| `concept_art_version` | string | No | Version of the concept art. |
+| `num_pol_count` | int | No | Target polygon count. |
+| `symmetrize` | bool | No | Apply symmetry. |
+| `symmetry_axis` | string | No | `x-`, `x+`, `y-`, `y+`, `z-`, `z+`. |
+
+### `POST /api/v1/3d-pipelines/from-upload` — Create from upload
+Start a 3D pipeline by uploading an image.
+
+**Request (multipart/form-data):**
+- `name`: Unique name for the 3D pipeline.
+- `image`: The image file.
+- `num_polys`: (Optional) Target polygon count.
+- `symmetrize`: (Optional) Boolean.
+- `symmetry_axis`: (Optional) Axis.
+
+### `GET /api/v1/3d-pipelines` — List 3D pipelines
+Returns a list of all 3D pipelines.
+
+### `GET /api/v1/3d-pipelines/{name}` — Get 3D pipeline state
+Returns the full state of a 3D pipeline.
+
+### `DELETE /api/v1/3d-pipelines/{name}` — Cancel 3D pipeline
+Cancels the 3D pipeline.
+
+### `GET /api/v1/3d-pipelines/{name}/sheet` — Review sheet
+Returns the mesh review sheet PNG.
+
+### `GET /api/v1/3d-pipelines/{name}/screenshot/{filename}` — Single screenshot
+Returns a specific screenshot PNG.
+
+### `GET /api/v1/3d-pipelines/{name}/preview` — HTML preview
+Returns the Three.js HTML preview.
+
+### `GET /api/v1/3d-pipelines/{name}/mesh` — Download GLB
+Returns the textured `.glb` mesh.
+
+### `POST /api/v1/3d-pipelines/{name}/approve` — Approve mesh
+Approves the mesh and exports it.
+
+**Request body:**
+```json
+{
+  "asset_name": "dragon_final",
+  "export_format": "glb"
+}
+```
+
+### `POST /api/v1/3d-pipelines/{name}/reject` — Reject mesh
+Rejects the mesh and re-queues generation with updated settings.
 
 ---
 

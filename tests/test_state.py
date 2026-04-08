@@ -11,8 +11,8 @@ import pytest
 from src.state import (
     ConceptArtItem,
     ConceptArtStatus,
-    MeshItem,
-    MeshStatus,
+    Pipeline3DState,
+    Pipeline3DStatus,
     PipelineState,
     PipelineStatus,
     SymmetryAxis,
@@ -68,35 +68,24 @@ class TestConceptArtItem:
         item = ConceptArtItem(index=1)
         assert item.prompts == []
 
-    def test_set_image_path(self):
-        item = ConceptArtItem(index=0, image_path="/some/path.png")
-        assert item.image_path == "/some/path.png"
+    def test_default_version_is_zero(self):
+        item = ConceptArtItem(index=0)
+        assert item.version == 0
+
+    def test_image_filename_reflects_index_and_version(self):
+        item = ConceptArtItem(index=0, version=0)
+        assert item.image_filename() == "concept_art_1_0.png"
+        item.version = 3
+        assert item.image_filename() == "concept_art_1_3.png"
+
+    def test_image_filename_second_slot(self):
+        item = ConceptArtItem(index=1, version=2)
+        assert item.image_filename() == "concept_art_2_2.png"
 
     def test_status_transition(self):
         item = ConceptArtItem(index=0, status=ConceptArtStatus.GENERATING)
         item.status = ConceptArtStatus.READY
         assert item.status == ConceptArtStatus.READY
-
-
-# ---------------------------------------------------------------------------
-# MeshItem
-# ---------------------------------------------------------------------------
-
-
-class TestMeshItem:
-    def test_default_status_is_queued(self):
-        item = MeshItem(concept_art_index=0, sub_name="test_1")
-        assert item.status == MeshStatus.QUEUED
-
-    def test_default_export_format(self):
-        item = MeshItem(concept_art_index=0, sub_name="test_1")
-        assert item.export_format == "glb"
-
-    def test_optional_paths_none_by_default(self):
-        item = MeshItem(concept_art_index=0, sub_name="test_1")
-        assert item.mesh_path is None
-        assert item.textured_mesh_path is None
-        assert item.export_path is None
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +99,7 @@ class TestPipelineStateCreation:
             name="my_model",
             description="a red car",
             num_polys=8000,
-            pipeline_dir="uncompleted_pipelines/my_model",
+            pipeline_dir="pipelines/my_model",
         )
         assert state.name == "my_model"
         assert state.num_polys == 8000
@@ -123,12 +112,11 @@ class TestPipelineStateCreation:
         assert state.symmetrize is False
         assert state.symmetry_axis == SymmetryAxis.X_MINUS
 
-    def test_concept_arts_and_meshes_empty_by_default(self):
+    def test_concept_arts_empty_by_default(self):
         state = PipelineState(
             name="n", description="d", num_polys=1000, pipeline_dir="p"
         )
         assert state.concept_arts == []
-        assert state.meshes == []
 
     def test_created_at_is_utc(self):
         state = PipelineState(
@@ -181,33 +169,15 @@ class TestPipelineStatePersistence:
             pipeline_dir="p",
         )
         state.concept_arts = [
-            ConceptArtItem(index=0, status=ConceptArtStatus.READY, image_path="/img.png"),
+            ConceptArtItem(index=0, status=ConceptArtStatus.READY, version=2),
             ConceptArtItem(index=1, status=ConceptArtStatus.APPROVED),
         ]
         p = tmp_path / "state.json"
         state.save(p)
         loaded = PipelineState.load(p)
         assert len(loaded.concept_arts) == 2
-        assert loaded.concept_arts[0].image_path == "/img.png"
+        assert loaded.concept_arts[0].version == 2
         assert loaded.concept_arts[1].status == ConceptArtStatus.APPROVED
-
-    def test_load_preserves_meshes(self, tmp_path):
-        state = PipelineState(
-            name="n", description="d", num_polys=1000, pipeline_dir="p"
-        )
-        state.meshes = [
-            MeshItem(
-                concept_art_index=0,
-                sub_name="n_1",
-                status=MeshStatus.GENERATING_MESH,
-                mesh_path="/mesh.glb",
-            )
-        ]
-        p = tmp_path / "state.json"
-        state.save(p)
-        loaded = PipelineState.load(p)
-        assert loaded.meshes[0].mesh_path == "/mesh.glb"
-        assert loaded.meshes[0].status == MeshStatus.GENERATING_MESH
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +207,89 @@ class TestPipelineStateQueries:
         )
         assert len(state.ready_concept_arts()) == 1
 
-    def test_pending_mesh_approvals(self):
-        state = PipelineState(
-            name="n", description="d", num_polys=1000, pipeline_dir="p"
+
+# ---------------------------------------------------------------------------
+# Pipeline3DState
+# ---------------------------------------------------------------------------
+
+
+class TestPipeline3DState:
+    def _make_state(self, tmp_path, **kwargs) -> Pipeline3DState:
+        defaults = dict(
+            name="ship_1_0",
+            input_image_path="/tmp/input.png",
+            num_polys=8000,
+            pipeline_dir="pipelines/ship_1_0",
         )
-        state.meshes = [
-            MeshItem(concept_art_index=0, sub_name="n_1", status=MeshStatus.AWAITING_APPROVAL),
-            MeshItem(concept_art_index=1, sub_name="n_2", status=MeshStatus.GENERATING_MESH),
-        ]
-        assert len(state.pending_mesh_approvals()) == 1
+        defaults.update(kwargs)
+        return Pipeline3DState(**defaults)
+
+    def test_default_status_is_queued(self, tmp_path):
+        state = self._make_state(tmp_path)
+        assert state.status == Pipeline3DStatus.QUEUED
+
+    def test_default_symmetry(self, tmp_path):
+        state = self._make_state(tmp_path)
+        assert state.symmetrize is False
+        assert state.symmetry_axis == SymmetryAxis.X_MINUS
+
+    def test_export_fields_default(self, tmp_path):
+        state = self._make_state(tmp_path)
+        assert state.export_version == 0
+        assert state.export_paths == []
+
+    def test_optional_paths_none(self, tmp_path):
+        state = self._make_state(tmp_path)
+        assert state.mesh_path is None
+        assert state.textured_mesh_path is None
+        assert state.screenshot_dir is None
+        assert state.review_sheet_path is None
+        assert state.html_preview_path is None
+
+    def test_source_fields_none_for_upload(self, tmp_path):
+        state = self._make_state(tmp_path, name="u_myship", pipeline_dir="pipelines/u_myship")
+        assert state.source_2d_pipeline is None
+        assert state.source_concept_art_index is None
+        assert state.source_concept_art_version is None
+
+    def test_source_fields_set_for_derived(self, tmp_path):
+        state = self._make_state(
+            tmp_path,
+            source_2d_pipeline="ship",
+            source_concept_art_index=0,
+            source_concept_art_version=2,
+        )
+        assert state.source_2d_pipeline == "ship"
+        assert state.source_concept_art_index == 0
+        assert state.source_concept_art_version == 2
+
+    def test_save_and_load_round_trip(self, tmp_path):
+        state = self._make_state(tmp_path, status=Pipeline3DStatus.MESH_DONE, mesh_path="/tmp/mesh.glb")
+        p = tmp_path / "state.json"
+        state.save(p)
+        loaded = Pipeline3DState.load(p)
+        assert loaded.name == state.name
+        assert loaded.status == Pipeline3DStatus.MESH_DONE
+        assert loaded.mesh_path == "/tmp/mesh.glb"
+
+    def test_save_creates_parent_dirs(self, tmp_path):
+        state = self._make_state(tmp_path)
+        p = tmp_path / "deep" / "nested" / "state.json"
+        state.save(p)
+        assert p.exists()
+
+    def test_serialises_status_as_string(self, tmp_path):
+        state = self._make_state(tmp_path, status=Pipeline3DStatus.AWAITING_APPROVAL)
+        p = tmp_path / "state.json"
+        state.save(p)
+        data = json.loads(p.read_text())
+        assert data["status"] == "awaiting_approval"
+
+    def test_touch_updates_updated_at(self, tmp_path):
+        state = self._make_state(tmp_path)
+        before = state.updated_at
+        state.touch()
+        assert state.updated_at >= before
 
 
 # ---------------------------------------------------------------------------

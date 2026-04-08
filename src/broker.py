@@ -14,11 +14,20 @@ Task lifecycle:  pending → running → done | failed
 
 Task types (task_type strings)
 -------------------------------
-  concept_art_generate   Generate concept art images (may be a subset by index).
-  concept_art_modify     Modify one image via the Gemini edit API.
-  mesh_generate          Run Trellis mesh generation for one approved concept art.
-  mesh_texture           Run Trellis texturing for one generated mesh.
-  screenshot             Take Blender screenshots + build review sheet + HTML preview.
+  concept_art_generate   Generate concept art images for a 2D pipeline.
+                         Handled by ConceptArtWorkerThread.
+  mesh_generate          Run Trellis mesh generation for a 3D pipeline.
+                         Handled by TrellisWorkerThread; auto-chains to
+                         mesh_texture on success.
+  mesh_texture           Run Trellis texturing for a 3D pipeline's mesh.
+                         Handled by TrellisWorkerThread; auto-chains to
+                         mesh_cleanup on success.
+  mesh_cleanup           Blender-based mesh clean-up / decimation / symmetrize.
+                         Handled by ScreenshotWorkerThread; auto-chains to
+                         screenshot on success.
+  screenshot             Take Blender screenshots + build review sheet + HTML
+                         preview, then set status AWAITING_APPROVAL.
+                         Handled by ScreenshotWorkerThread.
 """
 
 from __future__ import annotations
