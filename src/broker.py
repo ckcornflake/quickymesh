@@ -135,25 +135,31 @@ class Broker:
         Atomically claim the oldest pending task matching any of `task_types`.
         Returns None if no matching task is available.
         Sets status → 'running'.
+
+        `task_types` is treated as a priority-ordered list: the first type that
+        has a pending task is claimed, regardless of insertion order.  This lets
+        workers finish one pipeline end-to-end before starting another (e.g.
+        mesh_texture is preferred over mesh_generate so each pipeline reaches
+        AWAITING_APPROVAL before the next mesh generation begins).
         """
-        placeholders = ",".join("?" * len(task_types))
         with self._lock:
-            row = self._conn.execute(
-                f"SELECT * FROM tasks WHERE status='pending' AND task_type IN ({placeholders}) "
-                f"ORDER BY id ASC LIMIT 1",
-                task_types,
-            ).fetchone()
-            if row is None:
-                return None
-            now = _now()
-            self._conn.execute(
-                "UPDATE tasks SET status='running', updated_at=? WHERE id=?",
-                (now, row["id"]),
-            )
-            self._conn.commit()
-            task = _row_to_task(row)
-            task.status = "running"
-            return task
+            for task_type in task_types:
+                row = self._conn.execute(
+                    "SELECT * FROM tasks WHERE status='pending' AND task_type=? "
+                    "ORDER BY id ASC LIMIT 1",
+                    (task_type,),
+                ).fetchone()
+                if row is not None:
+                    now = _now()
+                    self._conn.execute(
+                        "UPDATE tasks SET status='running', updated_at=? WHERE id=?",
+                        (now, row["id"]),
+                    )
+                    self._conn.commit()
+                    task = _row_to_task(row)
+                    task.status = "running"
+                    return task
+            return None
 
     def mark_done(self, task_id: int) -> None:
         self._update_status(task_id, "done")

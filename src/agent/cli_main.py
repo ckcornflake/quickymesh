@@ -48,13 +48,14 @@ _IDLE_MENU = """\
 [n] Start a new 2D pipeline
 [3] Start a 3D pipeline from a local image
 [m] Manage a pipeline  ( [re]submit / edit / hide / kill )
+[u] Unhide a pipeline
 [w] Watch for status updates
 [t] Retry failed tasks
 [q] Quit"""
 
 # Numeric shortcut → option letter (matches _IDLE_MENU order)
 _IDLE_OPT_MAP = {
-    "1": "n", "2": "3", "3": "m", "4": "w", "5": "t", "6": "q",
+    "1": "n", "2": "3", "3": "m", "4": "u", "5": "w", "6": "t", "7": "q",
 }
 
 _WATCH_EXIT_CMD = "q"
@@ -184,7 +185,7 @@ def _idle_menu(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker=No
     # Apply numeric shortcut only when the input is not already a recognised option.
     # "3" is both the menu letter for the 3D pipeline option and a digit, so it
     # must not be overwritten by the numeric map.
-    _VALID = {"n", "3", "m", "w", "t", "q", ""}
+    _VALID = {"n", "3", "m", "u", "w", "t", "q", ""}
     if choice not in _VALID:
         choice = _IDLE_OPT_MAP.get(choice, choice)
 
@@ -213,6 +214,9 @@ def _idle_menu(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker=No
         if result == "quit":
             return "quit"
         return "manage"
+    if choice == "u":
+        _unhide_pipeline(agent, ui, cfg)
+        return "unhide"
     if choice == "w":
         _watch_mode(agent, ui, cfg, concept_worker, trellis_worker, restyle_worker)
         return "watch"
@@ -478,9 +482,6 @@ def _return_to_pipeline(agent, ui, cfg, concept_worker, restyle_worker=None) -> 
         )
         if result == "approved":
             _submit_approved_for_3d(state, agent, ui, cfg, pipeline_dir)
-        elif result == "cancelled":
-            agent.cancel_pipeline(name)
-            ui.inform(f"[{name}] Pipeline cancelled.")
         elif result == "quit":
             return True
         # Re-dismiss after the user exits so the priority loop doesn't
@@ -623,14 +624,15 @@ def _manage_pipeline(
     else:
         actions.append(("[h]", "Hide (keep folder, remove from active view)"))
     actions.append(("[k]", "Kill — permanently delete all content"))
+    actions.append(("[b]", "Back to main menu"))
 
     action_lines = ["\nActions:"]
     for letter, label in actions:
         action_lines.append(f"  {letter} {label}")
     ui.inform("\n".join(action_lines))
 
-    action_choice = ui.ask("Enter action (Enter to cancel):").strip().lower()
-    if not action_choice:
+    action_choice = ui.ask("Enter action (Enter to go back):").strip().lower()
+    if not action_choice or action_choice == "b":
         return
 
     valid_letters = {ltr.strip("[]") for ltr, _ in actions}
@@ -649,10 +651,6 @@ def _manage_pipeline(
             )
             if result == "approved":
                 _submit_approved_for_3d(state, agent, ui, cfg, pipeline_dir)
-                agent.dismiss_from_priority(name)
-            elif result == "cancelled":
-                agent.cancel_pipeline(name)
-                ui.inform(f"[{name}] Pipeline cancelled.")
                 agent.dismiss_from_priority(name)
             elif result == "quit":
                 return "quit"
@@ -749,6 +747,48 @@ def _set_hidden(cfg, name: str, ptype: str, *, hidden: bool) -> None:
         state = Pipeline3DState.load(state_path)
     state.hidden = hidden
     state.save(state_path)
+
+
+def _unhide_pipeline(agent, ui, cfg) -> None:
+    """
+    List all hidden pipelines (2D and 3D) and let the user pick one to restore.
+    """
+    from src.state import Pipeline3DState
+
+    hidden: list[tuple[str, str]] = []  # (name, "2d" | "3d")
+    for name in agent.list_pipeline_names():
+        s = agent.get_pipeline_state(name)
+        if s and s.hidden:
+            hidden.append((name, "2d"))
+    for name in agent.list_3d_pipeline_names():
+        s = agent.get_3d_pipeline_state(name)
+        if s and s.hidden:
+            hidden.append((name, "3d"))
+
+    if not hidden:
+        ui.inform("No hidden pipelines.")
+        return
+
+    lines = ["Hidden pipelines:"]
+    for i, (name, ptype) in enumerate(hidden, 1):
+        s = (agent.get_pipeline_state(name) if ptype == "2d"
+             else agent.get_3d_pipeline_state(name))
+        status = s.status.value if s else "unknown"
+        lines.append(f"  {i}. [{ptype.upper()}] {name}  [{status}]")
+    ui.inform("\n".join(lines))
+
+    choice = ui.ask("Enter number to unhide (Enter to cancel):").strip()
+    if not choice or not choice.isdigit():
+        return
+    idx = int(choice) - 1
+    if not (0 <= idx < len(hidden)):
+        ui.inform("Invalid selection.")
+        return
+
+    name, ptype = hidden[idx]
+    _set_hidden(cfg, name, ptype, hidden=False)
+    agent.undismiss_from_priority(name)
+    ui.inform(f"Pipeline '{name}' restored.")
 
 
 # ---------------------------------------------------------------------------
@@ -1151,10 +1191,6 @@ def _handle_priority_pipeline(
         if result == "approved":
             _submit_approved_for_3d(state_2d, agent, ui, cfg, pipeline_dir)
             agent.dismiss_from_priority(name)
-        elif result == "cancelled":
-            agent.cancel_pipeline(name)
-            ui.inform(f"[{name}] Pipeline cancelled.")
-            agent.dismiss_from_priority(name)
         elif result == "quit":
             return True
         # "back" → user chose menu; leave undismissed so watch mode and the
@@ -1282,9 +1318,11 @@ def _handle_3d_approval(name: str, agent, ui, cfg) -> bool:
                 )
                 continue
             version_exported = state.export_version - 1
+            state.hidden = True
+            state.save(state_path)
             ui.inform(
                 f"Mesh exported (version {version_exported}).  "
-                f"Pipeline is now idle — you can approve again for additional export versions."
+                f"Pipeline hidden — use 'Unhide' from the main menu to access it again."
             )
             return False
 

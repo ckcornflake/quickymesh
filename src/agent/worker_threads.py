@@ -170,7 +170,7 @@ class TrellisWorkerThread(_BaseWorkerThread):
         pipeline_name, state_path
     """
 
-    task_types = ["mesh_generate", "mesh_texture"]
+    task_types = ["mesh_texture", "mesh_generate"]  # texture preferred: finish one pipeline before starting another
 
     def __init__(
         self,

@@ -233,7 +233,6 @@ _ACTION_APPROVE = "approve"
 _ACTION_REGENERATE = "regenerate"
 _ACTION_MODIFY = "modify"
 _ACTION_RESTYLE = "restyle"
-_ACTION_CANCEL = "cancel"
 _ACTION_QUIT = "quit"
 _ACTION_MENU = "menu"
 
@@ -372,7 +371,6 @@ def run_concept_art_review(
                 + modify_line
                 + restyle_line +
                 "  menu               — return to main menu\n"
-                "  cancel             — cancel this pipeline\n"
                 "  quit               — exit the program\n"
             )
             for item in state.concept_arts:
@@ -507,16 +505,10 @@ def run_concept_art_review(
             state.concept_art_sheet_shown = False
             state.save(state_path)
 
-        # ── menu / cancel / quit ───────────────────────────────────────────
+        # ── menu / quit ────────────────────────────────────────────────────
         elif action == _ACTION_MENU:
             state.save(state_path)
             return "back"
-
-        elif action == _ACTION_CANCEL:
-            state.status = PipelineStatus.CANCELLED
-            state.save(state_path)
-            ui.inform("Pipeline cancelled.")
-            return "cancelled"
 
         elif action == _ACTION_QUIT:
             state.save(state_path)
@@ -529,7 +521,7 @@ def run_concept_art_review(
                 valid_actions.append("modify")
             if restyle_worker is not None:
                 valid_actions.append("restyle")
-            valid_actions += ["menu", "cancel", "quit"]
+            valid_actions += ["menu", "quit"]
             ui.inform(f"Unknown action '{action}'. Valid actions: {', '.join(valid_actions)}")
 
 

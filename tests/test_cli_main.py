@@ -23,6 +23,7 @@ from src.agent.cli_main import (
     _start_3d_pipeline_from_file,
     _start_new_pipeline,
     _submit_approved_for_3d,
+    _unhide_pipeline,
     _watch_mode,
     run_cli,
 )
@@ -145,12 +146,12 @@ class TestIdleMenu:
         assert result == "quit"
 
     def test_returns_watch_on_w_numeric(self, agent, cfg):
-        # [w] is now option 4 numerically
+        # [w] is now option 5 numerically (after [u] was added)
         import src.agent.cli_main as cli_mod
         original = cli_mod._watch_mode
         cli_mod._watch_mode = lambda *a, **kw: None
         try:
-            ui = MockPromptInterface(responses=["4"])
+            ui = MockPromptInterface(responses=["5"])
             result = _idle_menu(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
             assert result == "watch"
         finally:
@@ -551,6 +552,70 @@ class TestManagePipeline:
 
 
 # ---------------------------------------------------------------------------
+# _unhide_pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestUnhidePipeline:
+    def test_no_hidden_pipelines_message(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        ui = MockPromptInterface(responses=[])
+        _unhide_pipeline(agent, ui, cfg)
+        assert any("No hidden" in m for m in ui.messages)
+
+    def test_lists_hidden_2d_pipeline(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        sp = cfg.pipelines_dir / "pipe1" / "state.json"
+        state = PipelineState.load(sp)
+        state.hidden = True
+        state.save(sp)
+        ui = MockPromptInterface(responses=[""])  # cancel
+        _unhide_pipeline(agent, ui, cfg)
+        assert any("pipe1" in m for m in ui.messages)
+
+    def test_lists_hidden_3d_pipeline(self, agent, cfg):
+        state_path = _make_3d_awaiting(agent, cfg, "mdl_1_0")
+        state = Pipeline3DState.load(state_path)
+        state.hidden = True
+        state.save(state_path)
+        ui = MockPromptInterface(responses=[""])  # cancel
+        _unhide_pipeline(agent, ui, cfg)
+        assert any("mdl_1_0" in m for m in ui.messages)
+
+    def test_unhides_selected_pipeline(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        sp = cfg.pipelines_dir / "pipe1" / "state.json"
+        state = PipelineState.load(sp)
+        state.hidden = True
+        state.save(sp)
+        ui = MockPromptInterface(responses=["1"])
+        _unhide_pipeline(agent, ui, cfg)
+        state_after = PipelineState.load(sp)
+        assert state_after.hidden is False
+
+    def test_unhide_clears_dismissal(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        sp = cfg.pipelines_dir / "pipe1" / "state.json"
+        state = PipelineState.load(sp)
+        state.hidden = True
+        state.save(sp)
+        agent.dismiss_from_priority("pipe1")
+        ui = MockPromptInterface(responses=["1"])
+        _unhide_pipeline(agent, ui, cfg)
+        assert not agent.is_dismissed_from_priority("pipe1")
+
+    def test_idle_menu_routes_to_unhide(self, agent, cfg):
+        agent.start_pipeline("pipe1", "desc")
+        sp = cfg.pipelines_dir / "pipe1" / "state.json"
+        state = PipelineState.load(sp)
+        state.hidden = True
+        state.save(sp)
+        ui = MockPromptInterface(responses=["u", ""])  # choose u, cancel in unhide
+        result = _idle_menu(agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
+        assert result == "unhide"
+
+
+# ---------------------------------------------------------------------------
 # _kill_pipeline_folder
 # ---------------------------------------------------------------------------
 
@@ -833,21 +898,6 @@ class TestHandlePriorityPipeline:
 
         assert len(agent.list_3d_pipeline_names()) > 0
 
-    def test_cancelled_concept_art_cancels_broker_tasks(self, agent, cfg, broker):
-        state_path = self._make_review_state(
-            agent, cfg, "p1", PipelineStatus.CONCEPT_ART_REVIEW
-        )
-        pipeline_dir = state_path.parent
-        state = PipelineState.load(state_path)
-        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
-        state.save(state_path)
-
-        ui = MockPromptInterface(responses=["cancel"])
-        _handle_priority_pipeline("p1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker())
-
-        for t in broker.get_tasks(pipeline_name="p1"):
-            assert t.status == "failed"
-
     def test_handles_3d_awaiting_approval(self, agent, cfg):
         """_handle_priority_pipeline dispatches to 3D review for AWAITING_APPROVAL."""
         state_path = _make_3d_awaiting(agent, cfg, "mdl_1_0")
@@ -875,6 +925,7 @@ class TestHandle3DApproval:
         state = Pipeline3DState.load(state_path)
         assert state.status == Pipeline3DStatus.IDLE
         assert len(state.export_paths) == 1
+        assert state.hidden is True  # auto-hidden after approval
 
     def test_approve_returns_false(self, agent, cfg):
         _make_3d_awaiting(agent, cfg)
@@ -1170,14 +1221,6 @@ class TestPriorityDismissal:
     def test_handle_priority_dismisses_2d_after_approve(self, agent, cfg):
         self._make_2d_review(agent, cfg, "pipe1")
         ui = MockPromptInterface(responses=["approve 1 2", "n"])
-        _handle_priority_pipeline(
-            "pipe1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker()
-        )
-        assert agent.is_dismissed_from_priority("pipe1")
-
-    def test_handle_priority_dismisses_2d_after_cancel(self, agent, cfg):
-        self._make_2d_review(agent, cfg, "pipe1")
-        ui = MockPromptInterface(responses=["cancel"])
         _handle_priority_pipeline(
             "pipe1", agent, ui, cfg, MockConceptArtWorker(), MockTrellisWorker()
         )

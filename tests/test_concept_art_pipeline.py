@@ -319,13 +319,6 @@ class TestRunConceptArtReview:
         run_concept_art_review(state, MockConceptArtWorker(), pipeline_dir, ui, cfg)
         assert state.concept_arts[0].status == ConceptArtStatus.APPROVED
 
-    def test_cancel_returns_cancelled(self, state, pipeline_dir, cfg):
-        self._generate(state, pipeline_dir, cfg)
-        ui = MockPromptInterface(["cancel"])
-        result = run_concept_art_review(state, MockConceptArtWorker(), pipeline_dir, ui, cfg)
-        assert result == "cancelled"
-        assert state.status == PipelineStatus.CANCELLED
-
     def test_quit_returns_quit(self, state, pipeline_dir, cfg):
         self._generate(state, pipeline_dir, cfg)
         ui = MockPromptInterface(["quit"])
