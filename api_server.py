@@ -119,6 +119,15 @@ def build_app(*, auth_file: str | None = None):
 # Honour QUICKYMESH_AUTH_FILE so module-level loading still respects auth.
 app = build_app(auth_file=os.environ.get("QUICKYMESH_AUTH_FILE"))
 
+# Single-user fallback: if API_KEY is set (e.g. in Docker via docker/.env) but
+# no users.yaml was provided, enable auth with that key.  load_users() picks
+# up API_KEY from the environment when no users file exists.
+if not os.environ.get("QUICKYMESH_AUTH_FILE") and os.environ.get("API_KEY"):
+    from src.api.auth import load_users, set_auth_enabled
+    load_users(None)
+    set_auth_enabled(True)
+    log.info("Auth ENABLED via API_KEY env var (single-user mode)")
+
 
 if __name__ == "__main__":
     import uvicorn

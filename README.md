@@ -111,12 +111,12 @@ See the comments in `docker/.env.example` for the full list of variables you can
 override (model paths, pipeline root, etc.) — defaults are sensible for a
 repo-relative setup.
 
-> **Auth is off by default in the Docker container.** The server runs with auth
-> disabled regardless of what you set in `docker/.env`. If you need bearer-token
-> auth, the current workaround is a native install (see `api_server.py --auth-file`)
-> — enabling auth inside the container requires modifying
-> [startup.sh](docker/comfyui-trellis/startup.sh) to pass `--auth-file`. Improving
-> this is on the roadmap.
+> **Auth is off by default.** Set `API_KEY` in `docker/.env` to enable
+> single-user bearer-token auth, or mount a `users.yaml` file (see
+> [users.yaml.example](users.yaml.example) and the commented volume line in
+> [docker-compose.yml](docker/docker-compose.yml)) for multi-user mode. With
+> neither set, every request is treated as a local admin — fine for localhost,
+> not fine if you expose port 8000.
 
 ### Step 2 — Build the image
 
@@ -202,10 +202,11 @@ Connects to `http://localhost:8000` by default. To connect elsewhere:
 python main.py --server http://10.0.0.5:8000 --api-key your-api-key
 ```
 
-**Authentication is off by default.** To require a bearer token, start the server
-with `--auth-file path/to/users.yaml` (see [users.yaml.example](users.yaml.example)
-for the expected format). Auth is currently only wired up for native installs —
-see the note in the Docker setup section above.
+**Authentication is off by default.** To require a bearer token, either start
+the server with `--auth-file path/to/users.yaml` (see
+[users.yaml.example](users.yaml.example) for the expected format), or set the
+`API_KEY` env var for a single-user fallback. In Docker, set `API_KEY` in
+`docker/.env`.
 
 Once enabled, the CLI picks the token up from (in order):
 

@@ -173,21 +173,6 @@ Use this after starting a pipeline when you want to be notified as soon as conce
 
 ---
 
-## [r] Retry failed tasks
-
-If a pipeline shows failed tasks (e.g., from a Gemini timeout or ComfyUI error), retry resets them so the workers try again:
-
-```
-Pipelines with failed tasks:
-  1. red_dragon  [1 FAILED]
-
-Enter pipeline number:
-> 1
-Reset 1 failed task(s) for 'red_dragon'.
-```
-
----
-
 ## Watch mode during generation
 
 When you start a pipeline or approve images, the CLI optionally enters a live generation watch mode:
