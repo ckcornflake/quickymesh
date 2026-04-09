@@ -53,6 +53,14 @@ Two backends are available for concept art generation:
 | **Image modification** | Yes (`modify` command) | No |
 | **Use existing image as base** | Yes | No |
 | **API key required** | Yes | No |
+| **License** | Google API ToS (commercial OK) | FLUX.1 [dev] **Non-Commercial** License |
+
+> **Heads-up:** FLUX.1-dev weights are released under a **non-commercial** license.
+> Research, personal projects, and evaluation are fine; commercial use requires a
+> paid license from [Black Forest Labs](https://blackforestlabs.ai/). If you plan to
+> use quickymesh commercially, use the Gemini backend instead (or bring your own
+> commercially-licensed image model). See the full terms at
+> [huggingface.co/black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev).
 
 **To get a Gemini API key:** Visit [aistudio.google.com](https://aistudio.google.com/), sign in, go to API keys, and go to "Create API key". Image generation costs a small amount per request, but may provide a small number of initial images free — see [Google AI pricing](https://ai.google.dev/pricing).
 
@@ -86,7 +94,11 @@ The Docker container is the complete runtime — ComfyUI, the quickymesh API ser
 ### Step 1 — Configure
 
 ```bash
-cp docker/.env.example docker/.env
+cp docker/.env.example docker/.env          # bash / WSL / Linux
+```
+
+```powershell
+Copy-Item docker\.env.example docker\.env   # PowerShell
 ```
 
 Edit `docker/.env` and fill in at minimum:
@@ -95,7 +107,16 @@ Edit `docker/.env` and fill in at minimum:
 GEMINI_API_KEY=your_gemini_key      # only needed for the Gemini concept art backend
 ```
 
-> Server auth is off by default. If you want bearer-token auth, start the server with `--auth-file tokens.json` and the CLI will prompt to save the token on first connect.
+See the comments in `docker/.env.example` for the full list of variables you can
+override (model paths, pipeline root, etc.) — defaults are sensible for a
+repo-relative setup.
+
+> **Auth is off by default in the Docker container.** The server runs with auth
+> disabled regardless of what you set in `docker/.env`. If you need bearer-token
+> auth, the current workaround is a native install (see `api_server.py --auth-file`)
+> — enabling auth inside the container requires modifying
+> [startup.sh](docker/comfyui-trellis/startup.sh) to pass `--auth-file`. Improving
+> this is on the roadmap.
 
 ### Step 2 — Build the image
 
@@ -156,6 +177,15 @@ bash docker/build_run.sh logs
 
 > **First start:** Trellis model weights download on first startup if not already present — can take **10–30 minutes**.
 
+### Advanced: native Windows install (not officially supported)
+
+Docker is the **supported install path** for quickymesh — everything below is at
+your own risk and is not covered by issue triage. That said, if you'd rather run
+ComfyUI + Trellis natively on Windows (no Docker), the community video below walks
+through the ComfyUI + Trellis2 side of the install:
+
+- **[Installing Trellis2 for ComfyUI on Windows](https://www.youtube.com/watch?v=OkK-BfLiS2Q)** — *Atelier Darren, Jan 2026*. Not affiliated with this project. Covers ComfyUI + Trellis2 only; you'll still need to install Blender separately, set `BLENDER_PATH` and `COMFYUI_OUTPUT_DIR` in your environment, and run `python api_server.py` yourself. FLUX.1-dev and ControlNet restyle weights are also your responsibility (see `docker/download_models.sh` for the URLs and target paths).
+
 ---
 
 ## Using the CLI
@@ -172,11 +202,16 @@ Connects to `http://localhost:8000` by default. To connect elsewhere:
 python main.py --server http://10.0.0.5:8000 --api-key your-api-key
 ```
 
-**Authentication is off by default.** To require a bearer token, start the server with `--auth-file path/to/tokens.json`. Once enabled, the CLI can pick the token up from (in order):
+**Authentication is off by default.** To require a bearer token, start the server
+with `--auth-file path/to/users.yaml` (see [users.yaml.example](users.yaml.example)
+for the expected format). Auth is currently only wired up for native installs —
+see the note in the Docker setup section above.
+
+Once enabled, the CLI picks the token up from (in order):
 
 1. `--api-key` command-line flag
 2. `QUICKYMESH_API_KEY` environment variable
-3. Saved token file at `~/.config/quickymesh/token` (Linux/macOS) or `%APPDATA%/quickymesh/token` (Windows)
+3. Saved token file at `~/.config/quickymesh/token` (Linux/macOS) or `%APPDATA%/quickymesh/token` (Windows) — you currently need to create this file manually; the CLI does not prompt to save a token on first connect.
 
 The server URL can also be set via `QUICKYMESH_SERVER`.
 
@@ -261,7 +296,7 @@ pipeline_root/
 
 ## Testing
 
-All 503 tests are fully mocked — no real API or GPU needed:
+All 601 tests are fully mocked — no real API or GPU needed:
 
 ```bash
 python -m pytest tests/ -v
@@ -309,7 +344,42 @@ PipelineState (state.json)   — Pydantic model, saved to disk after every mutat
 
 - [CLI_MANUAL.md](CLI_MANUAL.md) — full CLI user guide
 - [API.md](API.md) — HTTP API reference for building frontends or integrations
-- [ARCHITECTURE_PLAN.md](ARCHITECTURE_PLAN.md) — full design document and roadmap
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR workflow
+- [CHANGELOG.md](CHANGELOG.md) — release notes
+
+---
+
+## License and third-party components
+
+quickymesh itself (the Python code in this repository) is released under the
+[MIT License](LICENSE). You can use, modify, and redistribute the code freely,
+including for commercial purposes, subject to the terms of that license.
+
+**However, quickymesh orchestrates a number of third-party tools and models, each
+with its own license.** The MIT license on this project's code does **not** cover
+those dependencies. If you plan to use quickymesh in a commercial context, review
+each of the following and make sure your use complies with its terms:
+
+| Component | Used for | License | Commercial use |
+|---|---|---|---|
+| **FLUX.1-dev** (weights) | Local concept art backend | FLUX.1 [dev] Non-Commercial License | ❌ Not permitted without a paid license from [Black Forest Labs](https://blackforestlabs.ai/) |
+| **Trellis / Trellis2** (weights) | 3D mesh generation | See the model card on [HuggingFace](https://huggingface.co/microsoft/TRELLIS-image-large) | Verify before commercial use |
+| **Juggernaut-XL** (weights) | ControlNet restyle | CreativeML Open RAIL++-M | Permitted with use-based restrictions |
+| **ControlNet Canny SDXL** (weights) | ControlNet restyle | OpenRAIL / Apache-2.0 (varies by variant) | Verify variant before use |
+| **DINOv2** (weights, used internally by Trellis) | 3D mesh generation | Apache-2.0 | ✅ |
+| **ComfyUI** | Workflow runtime in the Docker image | GPL-3.0 | ✅ (invoked as a separate process) |
+| **Blender** | Headless mesh cleanup, screenshots | GPL-3.0 | ✅ (invoked as a subprocess, not linked) |
+| **Gemini API** | Cloud concept art backend | Google API Terms of Service + Gemini additional terms | ✅ subject to Google's terms and per-request billing |
+| **PyTorch, FastAPI, Pydantic, and other Python deps** | Runtime | Various permissive (BSD / MIT / Apache-2.0) | ✅ |
+
+The most important item above is **FLUX.1-dev**, which is the only dependency with
+an outright non-commercial restriction. If that's a problem for your use case, use
+the Gemini backend (or supply your own commercially-licensed image model) for
+concept art and leave the local FLUX weights un-downloaded.
+
+This list is provided in good faith but is **not legal advice**. License terms for
+model weights in particular change over time — verify the current terms on each
+project's page before relying on them.
 
 ---
 

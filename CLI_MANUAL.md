@@ -10,11 +10,11 @@
 python main.py
 ```
 
-By default the server runs with **authentication disabled**, so no API key is needed. If the server was started with `--auth-file tokens.json`, the CLI resolves the bearer token in this order:
+By default the server runs with **authentication disabled**, so no API key is needed. If the server was started with `--auth-file users.yaml` (see [users.yaml.example](users.yaml.example)), the CLI resolves the bearer token in this order:
 
 1. `--api-key` flag
 2. `QUICKYMESH_API_KEY` environment variable
-3. Saved token file at `~/.config/quickymesh/token` (Linux/macOS) or `%APPDATA%/quickymesh/token` (Windows)
+3. Saved token file at `~/.config/quickymesh/token` (Linux/macOS) or `%APPDATA%/quickymesh/token` (Windows) — you currently need to create this file manually
 
 Similarly for the server URL: `--server`, then `QUICKYMESH_SERVER`, then default `http://localhost:8000`.
 
@@ -24,16 +24,16 @@ Similarly for the server URL: `--server`, then `QUICKYMESH_SERVER`, then default
 
 ```
 --- quickymesh ---
-[n] Start a new pipeline
-[e] Edit a pipeline
-[p] Pause / Resume / Cancel a pipeline
-[s] Status (workers + pipelines)
-[w] Watch for approvals
-[r] Retry failed tasks
+[n] Start a new 2D pipeline
+[3] Start a 3D pipeline from a local image
+[m] Manage a pipeline  ( [re]submit / edit / hide / kill )
+[u] Unhide a pipeline
+[w] Watch for status updates
+[t] Retry failed tasks
 [q] Quit
 ```
 
-If any pipeline is waiting for your attention (concept art or mesh review), the menu shows a notice and pressing Enter jumps straight to the first one.
+If any pipeline is waiting for your attention (concept art or mesh review), the menu shows a notice and pressing Enter jumps straight to the first one. Numeric shortcuts `1`–`7` are accepted as aliases for the letters above.
 
 ---
 
@@ -55,7 +55,7 @@ Walks you through creating a new pipeline:
 
 5. **Polygon count** — press Enter to use the default (8000). Higher poly counts produce more detailed meshes but take longer and use more VRAM.
 
-6. **Symmetry** — optionally symmetrize the final mesh. Enter an axis (`x-`, `x+`, `y-`, `y+`, `z-`, `z+`) to enable, or leave blank to skip. Default: `x-` (mirror the right side to the left, useful for characters and vehicles).
+6. **Symmetry** — optionally symmetrize the final mesh. Enter an axis (`x-`, `x+`, `y-`, `y+`, `z-`, `z+`) to enable, or leave blank to skip. Blank means no symmetrization; pick an explicit axis (e.g. `x-` to mirror the right side to the left) if you want it on.
 
 After confirming, concept art generation queues immediately and runs in the background.
 
@@ -71,12 +71,12 @@ Review sheet saved to: pipeline_root/uncompleted_pipelines/red_dragon/concept_ar
 (Opening image viewer...)
 
 Actions:
-  approve <indices>      — e.g. 'approve 1 3' to send to mesh generation
-  regenerate [indices]   — e.g. 'regenerate 2 4' or just 'regenerate' for all
-  modify <idx>           — edit one image via Gemini (replaces original)
-  restyle <idx>          — restyle via ControlNet Canny (changes art style)
-  cancel                 — cancel this pipeline
-  quit                   — exit the program
+  approve <indices>   — e.g. 'approve 1 3' to send to mesh generation
+  regenerate          — pick an image to regenerate (or 'regenerate all')
+  modify              — modify one image via Gemini (Gemini backend only)
+  restyle             — restyle image shape/silhouette via ControlNet
+  menu                — return to the main menu
+  quit                — exit the program
 
 Enter action
 >
@@ -92,30 +92,36 @@ Indices are **1-based** (matching the labels on the review sheet).
 ```
 Sends images 1 and 3 to mesh generation. You can approve multiple at once — each becomes a separate mesh. The pipeline continues in the background.
 
-**`regenerate [indices]`**
+**`regenerate`**
 ```
-> regenerate 2 4    # regenerate specific images
-> regenerate        # regenerate all images
+> regenerate
+Which image to regenerate? (1–4): 2
 ```
-Re-queues generation for the specified images. You can optionally change the description first — the CLI asks before queueing.
+or, to regenerate every concept art in one shot:
+```
+> regenerate all
+```
+Re-queues generation for the selected image(s). With `regenerate all` the CLI first asks whether you want to change the description; with single-image regenerate it uses the current description as-is. If you've made earlier edits you want to keep, prefer single-image regenerate.
 
-**`modify <idx>`** (Gemini backend only)
+**`modify`** (Gemini backend only)
 ```
-> modify 2
-Modification instruction: Remove the wings and add more detail to the claws
+> modify
+Which image to modify? (1–4): 2
+Describe the change to make to image 2: Remove the wings and add more detail to the claws
 ```
-Sends the image to Gemini with an edit instruction. The modified image replaces the original at that index. Use this for targeted changes without regenerating.
+Sends the image to Gemini with an edit instruction. A new version is saved alongside the original (concept art history is preserved). Use this for targeted changes without regenerating from scratch. If the image has prior versions, the CLI will also ask which version you want to base the modification on.
 
-**`restyle <idx>`** (requires ControlNet restyle worker)
+**`restyle`** (requires ControlNet restyle worker)
 ```
-> restyle 1
+> restyle
+Which image to restyle? (1–4): 1
 Positive prompt: fantasy oil painting, dramatic lighting, highly detailed
 Negative prompt (Enter for default):
-Denoise strength 0.1-1.0 (Enter for 0.75):
+Denoise strength 0.1–1.0 (Enter for default 0.75):
 ```
-Applies a new art style to the image while preserving its shape via ControlNet Canny edge guidance.
+Applies a new art style to the image while preserving its shape via ControlNet Canny edge guidance. Like `modify`, this creates a new version rather than overwriting the original.
 
-**`cancel`** — cancels the pipeline. The pipeline directory is kept but no further work is done.
+**`menu`** — returns to the main menu. The pipeline stays in `concept_art_review` on the server, so you can come back later (via `[m] Manage` or `[w] Watch`) to finish reviewing.
 
 **`quit`** — exits the program. Running pipelines continue on the server.
 
@@ -126,99 +132,29 @@ Applies a new art style to the image while preserving its shape via ControlNet C
 Once mesh generation, texturing, and screenshots are complete for a mesh, the CLI surfaces a review:
 
 ```
-Mesh 'red_dragon_1' is ready for review.
-(Opening screenshots...)
+3D mesh review for 'red_dragon_1_0'
+  Status: awaiting_approval
+  Mesh: pipeline_root/pipelines/red_dragon_1_0/meshes/.../textured.glb
 
 Actions:
-  approve <asset_name> [format]  — e.g. 'approve red_dragon_final' or 'approve red_dragon_final obj'
-  reject                          — send back for regeneration (pipeline continues)
-  cancel                          — cancel the pipeline entirely
-  quit                            — exit the program
+  approve       — export mesh to final assets
+  regenerate    — re-queue mesh generation (optionally with different poly count)
+  menu          — return to main menu
+  quit          — exit the program
 
 Enter action
 >
 ```
 
-The review sheet (6-angle screenshots) and an HTML 3-D viewer are opened automatically. Open `review_<name>.html` in a browser for the interactive viewer if it doesn't open automatically.
+The review sheet (6-angle screenshots) and an HTML 3-D viewer are opened automatically. Open `preview.html` in a browser for the interactive viewer if it doesn't open automatically.
 
-**`approve <asset_name> [format]`**
-```
-> approve red_dragon_final
-> approve red_dragon_final obj    # export as .obj instead of .glb
-```
-Approves the mesh and assigns it the final asset name. If multiple meshes are pending, the next one appears automatically. When all meshes are reviewed, approved ones are exported to `pipeline_root/final_game_ready_assets/`.
+**`approve`** — exports the mesh to `pipeline_root/final_game_ready_assets/` and hides the pipeline. Use `[u] Unhide` from the main menu if you want to access it again later.
 
-**`reject`** — rejects the mesh. The CLI optionally lets you update the polygon count and symmetry settings before re-queuing generation.
+**`regenerate`** — rejects the current mesh and re-queues mesh generation. The CLI optionally lets you update the polygon count and symmetry settings before re-queuing.
 
----
+**`menu`** — returns to the main menu without taking action. The pipeline stays in `awaiting_approval` on the server.
 
-## [e] Edit a pipeline
-
-Edit a pipeline's settings before mesh generation starts. Editing is only allowed while the pipeline is in `initializing`, `concept_art_generating`, or `concept_art_review` status.
-
-```
-Editable pipelines:
-  1. red_dragon  [concept_art_review]
-
-Enter pipeline number:
-> 1
-
-Current description: "a red dragon breathing fire"
-New description (Enter to keep):
-> a blue dragon exhaling ice
-
-Current polygon target: 8000
-New polygon count (Enter to keep):
-> 12000
-
-Current symmetry: on, axis=x-
-Enable symmetrize? (y/n, Enter to keep):
-> n
-
-Pipeline 'red_dragon' updated.
-```
-
----
-
-## [p] Pause / Resume / Cancel
-
-Manage a pipeline's lifecycle:
-
-```
-Pipelines:
-  1. red_dragon  [concept_art_generating]
-  2. spaceship   [mesh_generating]
-
-Enter pipeline number:
-> 1
-
-'red_dragon' is concept_art_generating. [p]ause or [c]ancel?
-> p
-Pipeline 'red_dragon' paused.
-```
-
-- **Pause** — halts the pipeline after the current in-flight task completes. Resume it later.
-- **Resume** — restarts a paused pipeline.
-- **Cancel** — cancels all pending tasks. The pipeline directory is kept for reference.
-
----
-
-## [s] Status
-
-Shows a snapshot of all workers and pipelines:
-
-```
-=== Workers ===
-  ConceptArtWorkerThread: running
-  TrellisWorkerThread: running
-  ScreenshotWorkerThread: running
-
-=== Pipelines ===
-  red_dragon: concept_art_review
-  spaceship: mesh_generating  [2 queued]
-```
-
-Brackets indicate queued or failed tasks. If a pipeline shows `[1 FAILED]`, use `[r] Retry` to reset those tasks.
+**`quit`** — exits the program.
 
 ---
 
@@ -228,7 +164,7 @@ Polls the server every 3 seconds for status changes. When a pipeline needs appro
 
 ```
 Watch mode active. Polling for updates every 3s.
-Press Ctrl-C to return to the menu.
+Press 'q' + Enter to return to the menu.
 
 [10:05:12] !!! APPROVAL NEEDED: red_dragon !!!
 ```

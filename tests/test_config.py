@@ -159,8 +159,7 @@ class TestOutputPaths:
         env = _make_env(tmp_path, "GEMINI_API_KEY=k\n")
         cfg = Config(defaults_path=defaults, env_path=env)
         assert cfg.final_assets_dir == cfg.output_root / "final_game_ready_assets"
-        assert cfg.completed_pipelines_dir == cfg.output_root / "completed_pipelines"
-        assert cfg.uncompleted_pipelines_dir == cfg.output_root / "uncompleted_pipelines"
+        assert cfg.pipelines_dir == cfg.output_root / "pipelines"
 
     def test_workflow_paths_exist(self):
         # Actual workflow files should be present in the repo

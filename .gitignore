@@ -144,7 +144,14 @@ smoke_test_output.png
 
 # Logs
 logs/
+docker/logs/
 coverage_phase1.json
+
+# Task queue / local databases
+tasks.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
 
 # Local config (contains real API keys)
 users.yaml
@@ -157,9 +164,13 @@ docker/models/
 # Claude Code project memory (local only)
 .claude/
 
-# Personal notes / task files
+# Personal notes / task files / internal design docs
 doc_updates.md
 DOC.md
+NEW_APPROACH.md
+ARCHITECTURE_PLAN.md
+fixes
+os_release
 
 # Environments
 .env

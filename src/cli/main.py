@@ -247,6 +247,35 @@ def _idle_menu(client, ui, cfg, session) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared prompts for the two pipeline-creation flows
+# ---------------------------------------------------------------------------
+
+
+def _ask_polys_and_symmetry(ui, cfg) -> tuple[int | None, bool, str]:
+    """
+    Prompt for target polygon count and symmetry axis.  Shared by
+    `_start_new_pipeline` (2D→3D) and `_start_3d_pipeline_from_file` (3D only).
+
+    Returns (num_polys, symmetrize, symmetry_axis).  Blank symmetry input means
+    off; any valid axis enables symmetry with that axis.
+    """
+    default_polys = cfg.get("num_polys_default")
+    polys_str = ui.ask(
+        f"Target polygon count (Enter for default {default_polys}):"
+    ).strip()
+    num_polys = int(polys_str) if polys_str.isdigit() else None
+
+    sym_raw = ui.ask(
+        "Symmetrize mesh after generation?\n"
+        f"  Options: {', '.join(_SYM_OPTIONS)}\n"
+        "  Enter an axis to enable, or leave blank to skip:"
+    ).strip().lower()
+    if sym_raw in _SYM_OPTIONS:
+        return num_polys, True, sym_raw
+    return num_polys, False, "x-"
+
+
+# ---------------------------------------------------------------------------
 # Start new 2D pipeline
 # ---------------------------------------------------------------------------
 
@@ -317,21 +346,7 @@ def _start_new_pipeline(client, ui, cfg) -> None:
         ui.inform("Cancelled.")
         return
 
-    # Polygon count
-    default_polys = cfg.get("num_polys_default")
-    polys_str = ui.ask(f"Target polygon count (Enter for default {default_polys}):").strip()
-    num_polys = int(polys_str) if polys_str.isdigit() else None
-
-    # Symmetry
-    sym_raw = ui.ask(
-        "Symmetrize mesh after generation?\n"
-        f"  Options: {', '.join(_SYM_OPTIONS)}\n"
-        "  Enter an axis to enable, or leave blank to skip:"
-    ).strip().lower()
-    if sym_raw in _SYM_OPTIONS:
-        symmetrize, symmetry_axis = True, sym_raw
-    else:
-        symmetrize, symmetry_axis = False, "x-"
+    num_polys, symmetrize, symmetry_axis = _ask_polys_and_symmetry(ui, cfg)
 
     # Create via appropriate endpoint
     try:
@@ -380,19 +395,7 @@ def _start_3d_pipeline_from_file(client, ui, cfg) -> None:
             break
         ui.inform(f"File not found: {p}\nPlease try again, or leave blank to cancel.")
 
-    default_polys = cfg.get("num_polys_default")
-    polys_str = ui.ask(f"Target polygon count (Enter for default {default_polys}):").strip()
-    num_polys = int(polys_str) if polys_str.isdigit() else None
-
-    sym_raw = ui.ask(
-        "Symmetrize mesh after generation?\n"
-        f"  Options: {', '.join(_SYM_OPTIONS)}\n"
-        "  Enter an axis to enable, or leave blank to skip:"
-    ).strip().lower()
-    if sym_raw in _SYM_OPTIONS:
-        symmetrize, symmetry_axis = True, sym_raw
-    else:
-        symmetrize, symmetry_axis = False, "x-"
+    num_polys, symmetrize, symmetry_axis = _ask_polys_and_symmetry(ui, cfg)
 
     try:
         result = client.create_3d_pipeline_from_upload(
@@ -1451,7 +1454,9 @@ def _retry_failed(client, ui) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-platform single-key stdin helpers (copied from old cli_main.py)
+# Cross-platform single-key stdin helpers.  Used by watch-mode / review-wait
+# loops to poll for an exit keystroke without blocking.  Windows uses msvcrt;
+# POSIX uses termios+tty in cbreak mode.
 # ---------------------------------------------------------------------------
 
 _saved_term_settings = None

@@ -32,7 +32,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 import httpx
 

@@ -265,8 +265,8 @@ class TestStartNewPipeline:
         assert call_args.args[0] == "mybot"
         assert call_args.args[1] == "make it red"
         assert Path(call_args.args[2]) == img
-        assert call_args.kwargs["symmetrize"] is True
-        assert call_args.kwargs["symmetry_axis"] == "x-"
+        # Blank symmetry input → symmetrize off (see _ask_polys_and_symmetry).
+        assert call_args.kwargs["symmetrize"] is False
 
     def test_conflict_reported(self, client, cfg, monkeypatch):
         monkeypatch.setattr("src.cli.main.load_preferences", lambda: {})
@@ -287,8 +287,8 @@ class TestStart3DFromFile:
         client.create_3d_pipeline_from_upload.assert_called_once()
         kwargs = client.create_3d_pipeline_from_upload.call_args.kwargs
         assert kwargs["num_polys"] == 4000
-        assert kwargs["symmetrize"] is True
-        assert kwargs["symmetry_axis"] == "x-"
+        # Blank symmetry input → symmetrize off (see _ask_polys_and_symmetry).
+        assert kwargs["symmetrize"] is False
 
     def test_cancelled_on_missing_name(self, client, cfg):
         ui = MockPromptInterface([""])
