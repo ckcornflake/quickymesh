@@ -153,6 +153,31 @@ def _pipeline_lists(client: QuickymeshClient) -> tuple[list[dict], list[dict]]:
     return p2, p3
 
 
+def _maybe_dismiss(
+    client: QuickymeshClient, session: _Session, name: str, ptype: str,
+) -> None:
+    """
+    Dismiss the pipeline from this watch session only if it is still in its
+    review-waiting status.  Rationale: if the user bailed without resolving
+    (status still awaiting), we dismiss to avoid re-prompting every tick.
+    But if the handler returned because the pipeline has moved off the
+    review state (e.g. user regenerated, or the server transiently moved it
+    during a race), we want watch mode to notice and re-prompt once it
+    settles back into the review state.
+    """
+    try:
+        if ptype == "2d":
+            full = client.get_pipeline_or_none(name)
+            still_waiting = full is not None and full.get("status") == _S2D_REVIEW
+        else:
+            full = client.get_3d_pipeline_or_none(name)
+            still_waiting = full is not None and full.get("status") == _S3D_AWAITING
+    except QuickymeshAPIError:
+        still_waiting = False
+    if still_waiting:
+        session.dismiss(name)
+
+
 def _all_needing_attention(client: QuickymeshClient, session: _Session) -> list[tuple[str, str]]:
     """Return [(name, '2d'|'3d')] for pipelines waiting on the user."""
     waiting: list[tuple[str, str]] = []
@@ -301,12 +326,10 @@ def _start_new_pipeline(client, ui, cfg) -> None:
     sym_raw = ui.ask(
         "Symmetrize mesh after generation?\n"
         f"  Options: {', '.join(_SYM_OPTIONS)}\n"
-        "  Enter an axis to enable (default: x-), or leave blank to skip:"
+        "  Enter an axis to enable, or leave blank to skip:"
     ).strip().lower()
     if sym_raw in _SYM_OPTIONS:
         symmetrize, symmetry_axis = True, sym_raw
-    elif not sym_raw:
-        symmetrize, symmetry_axis = True, "x-"
     else:
         symmetrize, symmetry_axis = False, "x-"
 
@@ -364,12 +387,10 @@ def _start_3d_pipeline_from_file(client, ui, cfg) -> None:
     sym_raw = ui.ask(
         "Symmetrize mesh after generation?\n"
         f"  Options: {', '.join(_SYM_OPTIONS)}\n"
-        "  Enter an axis to enable (default: x-), or leave blank to skip:"
+        "  Enter an axis to enable, or leave blank to skip:"
     ).strip().lower()
     if sym_raw in _SYM_OPTIONS:
         symmetrize, symmetry_axis = True, sym_raw
-    elif not sym_raw:
-        symmetrize, symmetry_axis = True, "x-"
     else:
         symmetrize, symmetry_axis = False, "x-"
 
@@ -1304,22 +1325,17 @@ def _watch_mode(
                         if result == "quit":
                             quit_requested = True
                             break
-                        # Dismiss in all non-quit cases (approved, back,
-                        # interrupted wait, etc.) — the user has seen the
-                        # pipeline this session and chose their action.
-                        # Re-entry is available via manage pipeline; without
-                        # this the busy-state prompt would loop every tick.
-                        session.dismiss(name)
+                        # Only dismiss if the pipeline is *still* sitting in
+                        # concept_art_review after the handler returns — i.e.
+                        # the user bailed without resolving it.  If it has
+                        # moved on (regenerate queued, approved, etc.) we want
+                        # watch mode to re-prompt when/if it comes back.
+                        _maybe_dismiss(client, session, name, "2d")
                     else:
                         if _handle_3d_approval(client, ui, name):
                             quit_requested = True
                             break
-                        # Dismiss in all non-quit cases.  If the user approved
-                        # or rejected, the state will have moved out of
-                        # AWAITING_APPROVAL anyway; if they went back to menu,
-                        # dismissing prevents the watch loop from re-triggering
-                        # the same review prompt every tick.
-                        session.dismiss(name)
+                        _maybe_dismiss(client, session, name, "3d")
                 if quit_requested:
                     return
                 ui.inform(

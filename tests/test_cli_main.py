@@ -130,6 +130,36 @@ class TestSession:
         assert not s.is_dismissed("p")
 
 
+class TestMaybeDismiss:
+    def test_3d_still_awaiting_dismisses(self, client, session):
+        client.get_3d_pipeline_or_none.return_value = _state_3d(status="awaiting_approval")
+        cli_main._maybe_dismiss(client, session, "p_1_0", "3d")
+        assert session.is_dismissed("p_1_0")
+
+    def test_3d_moved_off_awaiting_does_not_dismiss(self, client, session):
+        # Simulates the race: between the watch tick and the user's response,
+        # the server moved the pipeline off awaiting_approval.  We must not
+        # dismiss — watch mode needs to re-prompt when it comes back.
+        client.get_3d_pipeline_or_none.return_value = _state_3d(status="cleanup_done")
+        cli_main._maybe_dismiss(client, session, "p_1_0", "3d")
+        assert not session.is_dismissed("p_1_0")
+
+    def test_2d_still_in_review_dismisses(self, client, session):
+        client.get_pipeline_or_none.return_value = _state_2d(status="concept_art_review")
+        cli_main._maybe_dismiss(client, session, "p", "2d")
+        assert session.is_dismissed("p")
+
+    def test_2d_moved_off_review_does_not_dismiss(self, client, session):
+        client.get_pipeline_or_none.return_value = _state_2d(status="concept_art_generating")
+        cli_main._maybe_dismiss(client, session, "p", "2d")
+        assert not session.is_dismissed("p")
+
+    def test_missing_pipeline_does_not_dismiss(self, client, session):
+        client.get_3d_pipeline_or_none.return_value = None
+        cli_main._maybe_dismiss(client, session, "ghost", "3d")
+        assert not session.is_dismissed("ghost")
+
+
 class TestConceptArtsBusy:
     def test_empty(self):
         assert cli_main._concept_arts_busy({"concept_arts": []}) is False
