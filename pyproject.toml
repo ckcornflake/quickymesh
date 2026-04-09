@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quickymesh"
+version = "0.1.0"
+description = "Generate game-ready 3-D assets from a text description or an existing image, using a local AI pipeline."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [
+    { name = "ckcornflake" },
+]
+keywords = ["3d", "mesh", "generation", "trellis", "comfyui", "flux", "gemini", "blender"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+# Runtime dependencies are declared in requirements.txt to keep a single
+# source of truth.  Install with:  pip install -r requirements.txt
+# (or `pip install -e .` after uncommenting the dependencies list below).
+dependencies = [
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "PyYAML>=6.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sse-starlette>=2.1.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "google-genai>=1.10.0",
+    "Pillow>=10.0.0",
+    "requests>=2.31.0",
+    "trimesh>=4.4.0",
+    "numpy>=1.24.0",
+    "python-json-logger>=3.2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.14.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ckcornflake/quickymesh"
+Issues = "https://github.com/ckcornflake/quickymesh/issues"
+Changelog = "https://github.com/ckcornflake/quickymesh/blob/main/CHANGELOG.md"
+
+[project.scripts]
+quickymesh = "main:main"
+
+[tool.setuptools]
+# Top-level entry points are plain scripts, not a package — list the src/
+# package tree explicitly.
+py-modules = ["main", "api_server"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+exclude = ["tests*", "docker*", "comfyui_workflows*", "blender_scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:google.genai.*",
+]

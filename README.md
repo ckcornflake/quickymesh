@@ -2,7 +2,7 @@
 
 Generate game-ready 3-D assets from a text description — or an existing image — using a local AI pipeline.
 
-**Current state:** Phase 1 complete. The pipeline runs as a REST API server backed by worker threads. A CLI client (`main.py`) provides the full user experience over HTTP. A Dockerized ComfyUI+Trellis container handles all GPU-intensive generation. Blender handles screenshots and mesh cleanup on the host.
+**Status:** v0.1.0 — usable, single-user. quickymesh runs as a REST API server (`api_server.py`) backed by worker threads, with an interactive CLI client (`main.py`) that talks to it over HTTP. A single Docker container runs ComfyUI, Trellis, and Blender; the CLI runs on the host. See the [roadmap](#roadmap) for what's next.
 
 ---
 
@@ -32,8 +32,6 @@ Queue up as many pipelines as you want — background worker threads drain them 
 | Blender | Included in the Docker image — nothing to install on the host. |
 | Disk | **~60 GB** free for Docker image (~20 GB) + model weights (~40 GB) |
 
-**Note on Blender path:** By default, the configuration points to a local Windows path for non-Docker users. For Docker users, this is handled internally via the container environment.
-
 **Windows users:** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and enable the WSL 2 backend. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU passthrough inside Docker.
 
 ---
@@ -62,7 +60,14 @@ Two backends are available for concept art generation:
 > commercially-licensed image model). See the full terms at
 > [huggingface.co/black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev).
 
-**To get a Gemini API key:** Visit [aistudio.google.com](https://aistudio.google.com/), sign in, go to API keys, and go to "Create API key". Image generation costs a small amount per request, but may provide a small number of initial images free — see [Google AI pricing](https://ai.google.dev/pricing).
+**To get a Gemini API key:** Visit [aistudio.google.com](https://aistudio.google.com/), sign in, go to API keys, and click "Create API key". Image generation costs a small amount per request, but may provide a small number of initial images free — see [Google AI pricing](https://ai.google.dev/pricing).
+
+> **Gemini request failures?** If your concept art requests come back with auth
+> or quota errors even though the key is valid, the most common fix is enabling
+> billing on the key's Google Cloud project. Image generation models are often
+> gated behind a billing-enabled project even when you have free-tier credit
+> available. Open the key in AI Studio, click through to its Cloud project, and
+> attach a billing account.
 
 ---
 
@@ -147,8 +152,8 @@ bash docker/download_models.sh trellis   # Trellis2 + DINOv2 (~25 GB)
 ```
 
 > **FLUX.1-dev** requires accepting the license at [huggingface.co/black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) and logging in with `huggingface-cli login` first.
-
-> **Trellis weights** also download automatically on first container start. Skip `download_models.sh trellis` if you prefer that or have an existing local copy.
+>
+> **Trellis weights** also download automatically on first container start if you skip the `trellis` target above.
 
 ### Step 4 — Start the container
 
@@ -170,12 +175,38 @@ Once running:
 
 Watch startup logs with:
 
-```bash
+```powershell
 .\docker\build_run.ps1 logs
+```
+
+```bash
 bash docker/build_run.sh logs
 ```
 
-> **First start:** Trellis model weights download on first startup if not already present — can take **10–30 minutes**.
+> **First start:** if you skipped `download_models.sh trellis`, Trellis model
+> weights download on first container start — expect **10–30 minutes** before
+> the first mesh generation task will run.
+
+### Just want a working Trellis2 + ComfyUI?
+
+Installing Trellis2 into a native ComfyUI setup is notoriously fiddly — custom
+wheels, CUDA toolchain matching, PyTorch versions, extension dependencies, the
+lot. If you don't care about the quickymesh pipeline and just want a ComfyUI
+instance with Trellis2 working out of the box, this container is a reasonable
+way to get there:
+
+1. Follow the Docker setup above through Step 4 (you can leave `GEMINI_API_KEY`
+   blank in `docker/.env`).
+2. Skip `main.py` entirely.
+3. Open ComfyUI directly at [http://localhost:8190](http://localhost:8190) and
+   use it like any other ComfyUI install — your own workflows, your own nodes,
+   your own models dropped into `docker/models/trellis/`.
+4. The quickymesh API server will also be running on `:8000` but you can ignore
+   it, or disable it by editing [docker/comfyui-trellis/startup.sh](docker/comfyui-trellis/startup.sh).
+
+The `comfyui_workflows/trellis_generate.json` and `trellis_texture.json`
+workflows in this repo are also usable as standalone ComfyUI workflows if you
+want a working starting point.
 
 ### Advanced: native Windows install (not officially supported)
 
@@ -227,11 +258,11 @@ All defaults live in `defaults.yaml`. Key settings and their environment overrid
 | Setting | Default | Env variable |
 |---|---|---|
 | `infrastructure.comfyui_url` | `http://localhost:8190` | `COMFYUI_URL` |
-| `infrastructure.blender_path` | `C:/Program Files/.../blender.exe` | `BLENDER_PATH` |
+| `infrastructure.blender_path` | `C:/Program Files/Blender Foundation/Blender 4.5/blender.exe` | `BLENDER_PATH` |
 | `infrastructure.comfyui_output_dir` | _(required for Docker)_ | `COMFYUI_OUTPUT_DIR` |
 | `generation.num_concept_arts` | `4` | `NUM_CONCEPT_ARTS` |
 | `generation.num_polys` | `8000` | `NUM_POLYS` |
-| `gemini.model` | `gemini-2.5-flash-preview-04-17` | `GEMINI_MODEL` |
+| `gemini.model` | `gemini-2.5-flash-image` | `GEMINI_MODEL` |
 | `output.root` | `pipeline_root/` | `OUTPUT_ROOT` |
 
 When using the Docker container, set `COMFYUI_OUTPUT_DIR` in `.env` to the host path that is volume-mounted into the container as `/app/output`. This allows the Python server (running on the host) to read generated files.
@@ -348,6 +379,7 @@ PipelineState (state.json)   — Pydantic model, saved to disk after every mutat
 
 - [CLI_MANUAL.md](CLI_MANUAL.md) — full CLI user guide
 - [API.md](API.md) — HTTP API reference for building frontends or integrations
+- [examples/prompts.md](examples/prompts.md) — sample descriptions that produce good results
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR workflow
 - [CHANGELOG.md](CHANGELOG.md) — release notes
 

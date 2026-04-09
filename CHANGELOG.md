@@ -34,7 +34,7 @@ reference images into game-ready 3D assets.
 - **Unified Docker runtime.** Single container bundles ComfyUI, Blender, and the
   quickymesh API server. CLI runs on the host.
 - **Optional bearer-token auth** on the API server.
-- **601 unit tests**, fully mocked — no GPU or external API access required to run
+- **600 unit tests**, fully mocked — no GPU or external API access required to run
   the suite.
 
 ### Known limitations
