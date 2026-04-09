@@ -93,20 +93,17 @@ class TestToken:
         monkeypatch.setattr(client_mod, "_token_path", lambda: tmp_path / "tok")
         assert client_mod.load_token() is None
 
-    def test_save_then_load(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(client_mod, "_token_path", lambda: tmp_path / "tok")
-        client_mod.save_token("abc123")
+    def test_load_reads_file(self, monkeypatch, tmp_path):
+        p = tmp_path / "tok"
+        p.write_text("abc123", encoding="utf-8")
+        monkeypatch.setattr(client_mod, "_token_path", lambda: p)
         assert client_mod.load_token() == "abc123"
 
-    def test_clear_removes_file(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(client_mod, "_token_path", lambda: tmp_path / "tok")
-        client_mod.save_token("abc")
-        client_mod.clear_token()
-        assert client_mod.load_token() is None
-
-    def test_clear_missing_is_silent(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(client_mod, "_token_path", lambda: tmp_path / "nope")
-        client_mod.clear_token()  # must not raise
+    def test_load_strips_whitespace(self, monkeypatch, tmp_path):
+        p = tmp_path / "tok"
+        p.write_text("  abc123\n", encoding="utf-8")
+        monkeypatch.setattr(client_mod, "_token_path", lambda: p)
+        assert client_mod.load_token() == "abc123"
 
 
 # ---------------------------------------------------------------------------

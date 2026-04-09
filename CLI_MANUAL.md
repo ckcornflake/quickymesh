@@ -193,7 +193,7 @@ The status line updates whenever any per-image status changes. Press `q` + Enter
 
 ## Tips
 
-- **Multiple pipelines:** Start several pipelines and they all run concurrently. The CLI shows whichever needs attention next.
+- **Multiple pipelines:** You can queue up as many pipelines as you want. GPU-heavy tasks (FLUX, Trellis, ControlNet restyle) run one at a time via a VRAM arbiter, and each worker type (concept art / mesh / screenshots) processes one task at a time — so in practice pipelines run mostly serially on the GPU, with a little overlap between CPU-bound screenshots and GPU-bound generation. The CLI stays responsive throughout and surfaces whichever pipeline needs attention next.
 - **Disconnect and reconnect:** The server keeps running after you exit the CLI. Reconnect later with `python main.py` and your pipelines will still be there.
 - **Check the review sheet first:** The 6-angle screenshot review sheet opens automatically. But open `preview.html` in a browser for an interactive 3-D view before approving.
 - **Reject to iterate:** Rejected meshes automatically re-queue with the same (or updated) settings. You can reject many times — there's no limit.

@@ -15,7 +15,7 @@ Generate game-ready 3-D assets from a text description — or an existing image 
 5. Blender renders screenshots from 6 angles and generates an interactive HTML preview.
 6. You approve or reject each mesh, then export the winners as `.glb` (or `.obj`).
 
-Multiple pipelines run concurrently. Background worker threads handle GPU work so you're never waiting idle.
+Queue up as many pipelines as you want — background worker threads drain them while you keep using the CLI. GPU-heavy tasks are serialized by a VRAM arbiter (no OOM), so pipelines mostly run one after another on the GPU, with some CPU-bound overlap.
 
 ---
 
@@ -277,27 +277,30 @@ On 16 GB cards running both FLUX and Trellis, you may need to set `keep_models_l
 ```
 pipeline_root/
   tasks.db                               — SQLite task queue (crash-safe)
-  uncompleted_pipelines/
-    <name>/
+  pipelines/
+    <name>/                              — 2D pipeline: concept art → N child 3D pipelines
       state.json                         — pipeline state (Pydantic)
-      concept_arts/                      — generated PNGs (1024×1024)
-      meshes/<name>_1/
-        mesh.glb                         — initial Trellis mesh
-        textured.glb                     — textured mesh
+      concept_art/                       — generated PNGs + review sheet
+    <name>_<i>/                          — 3D pipeline spawned from concept art index i
+      state.json
+      meshes/
+        textured_mesh.glb                — final textured mesh from Trellis
         screenshots/                     — 6-angle Blender renders
-        review_<name>_1.png              — screenshot review sheet
-        preview.html                     — interactive Three.js viewer
-  completed_pipelines/                   — moved here after export
+      preview.html                       — interactive Three.js viewer
   final_game_ready_assets/
-    <asset_name>/
-      <asset_name>.glb                   — exported game-ready mesh
+    <asset_name>_v<N>.glb                — exported game-ready mesh (flat files)
 ```
+
+2D pipelines (`[n]` in the CLI) go through concept art review and then spawn
+one or more 3D child pipelines (one per approved image). 3D-only pipelines
+(`[3]` in the CLI, starting from a local image) skip concept art entirely and
+use the same `<name>_<i>` directory layout.
 
 ---
 
 ## Testing
 
-All 601 tests are fully mocked — no real API or GPU needed:
+All 600 tests are fully mocked — no real API or GPU needed:
 
 ```bash
 python -m pytest tests/ -v

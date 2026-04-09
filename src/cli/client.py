@@ -124,26 +124,6 @@ def load_token() -> str | None:
         return None
 
 
-def save_token(token: str) -> None:
-    p = _token_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(token, encoding="utf-8")
-    # Best-effort restrictive permissions on POSIX.
-    if sys.platform != "win32":
-        try:
-            os.chmod(p, 0o600)
-        except OSError:
-            pass
-
-
-def clear_token() -> None:
-    p = _token_path()
-    try:
-        p.unlink()
-    except (FileNotFoundError, OSError):
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
