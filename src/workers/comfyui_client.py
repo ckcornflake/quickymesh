@@ -153,13 +153,29 @@ class ComfyUIClient:
     # Image upload
     # ------------------------------------------------------------------
 
-    def upload_image(self, image_path: Path | str) -> str:
+    def upload_image(
+        self,
+        image_path: Path | str,
+        server_name: str | None = None,
+    ) -> str:
         """
         Upload a local file to ComfyUI's input directory.
         Returns the server-side filename (used in workflow node inputs).
         Works for images (PNG, JPEG) and meshes (GLB, OBJ).
+
+        Parameters
+        ----------
+        image_path:  Local file to upload.
+        server_name: Override the server-side filename.  Use this to namespace
+                     uploads per-job so two pipelines with the same source
+                     basename (e.g. both have a `concept_art_1_0.png`) cannot
+                     collide on ComfyUI's shared /input directory.  ComfyUI's
+                     node cache also keys off the filename, so reusing a bare
+                     basename across pipelines can serve stale cached outputs.
+                     If None, falls back to `image_path.name`.
         """
         image_path = Path(image_path)
+        upload_name = server_name or image_path.name
         _MIME_OVERRIDES = {".glb": "model/gltf-binary", ".obj": "model/obj"}
         mime = _MIME_OVERRIDES.get(image_path.suffix.lower()) or mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
         boundary = uuid.uuid4().hex
@@ -172,7 +188,7 @@ class ComfyUIClient:
             f'Content-Disposition: form-data; name="overwrite"\r\n\r\n'
             f"true\r\n"
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="image"; filename="{image_path.name}"\r\n'
+            f'Content-Disposition: form-data; name="image"; filename="{upload_name}"\r\n'
             f"Content-Type: {mime}\r\n\r\n"
         ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
 
@@ -189,9 +205,9 @@ class ComfyUIClient:
             _raise_connection_error(exc, self.base_url)
             raise  # unreachable — satisfies type checkers
 
-        server_name = result.get("name", image_path.name)
-        log.info(f"Uploaded {image_path.name} → server name: {server_name}")
-        return server_name
+        returned_name = result.get("name", upload_name)
+        log.info(f"Uploaded {image_path.name} → server name: {returned_name}")
+        return returned_name
 
     # ------------------------------------------------------------------
     # HTTP helpers

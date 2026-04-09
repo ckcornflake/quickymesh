@@ -174,7 +174,7 @@ RUN mkdir -p models output input
 # Build context is the repo root — copy source and config files.
 COPY --chown=comfy:comfy src /quickymesh/src
 COPY --chown=comfy:comfy api_server.py /quickymesh/api_server.py
-COPY --chown=comfy:comfy qm_cli.py /quickymesh/qm_cli.py
+COPY --chown=comfy:comfy main.py /quickymesh/main.py
 COPY --chown=comfy:comfy defaults.yaml /quickymesh/defaults.yaml
 COPY --chown=comfy:comfy comfyui_workflows /quickymesh/comfyui_workflows
 COPY --chown=comfy:comfy blender_scripts /quickymesh/blender_scripts

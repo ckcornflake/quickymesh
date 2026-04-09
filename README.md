@@ -2,7 +2,7 @@
 
 Generate game-ready 3-D assets from a text description — or an existing image — using a local AI pipeline.
 
-**Current state:** Phase 1 complete. The pipeline runs as a REST API server backed by worker threads. A CLI client (`qm_cli.py`) provides the full user experience over HTTP. A Dockerized ComfyUI+Trellis container handles all GPU-intensive generation. Blender handles screenshots and mesh cleanup on the host.
+**Current state:** Phase 1 complete. The pipeline runs as a REST API server backed by worker threads. A CLI client (`main.py`) provides the full user experience over HTTP. A Dockerized ComfyUI+Trellis container handles all GPU-intensive generation. Blender handles screenshots and mesh cleanup on the host.
 
 ---
 
@@ -79,7 +79,7 @@ The server, Blender, and ComfyUI all run inside Docker — nothing else is neede
 
 ## Docker setup
 
-The Docker container is the complete runtime — ComfyUI, the quickymesh API server, and Blender all run inside one image. Nothing else needs to be installed on the host beyond Python for `qm_cli.py`.
+The Docker container is the complete runtime — ComfyUI, the quickymesh API server, and Blender all run inside one image. Nothing else needs to be installed on the host beyond Python for the CLI client (`main.py`).
 
 > **Time warning:** The first build downloads PyTorch, ComfyUI, model dependencies, and Blender. Expect **30–60 minutes** on a typical connection. Subsequent builds use the Docker layer cache and finish in seconds unless the Dockerfile changes.
 
@@ -92,9 +92,10 @@ cp docker/.env.example docker/.env
 Edit `docker/.env` and fill in at minimum:
 
 ```
-API_KEY=your-secret-api-key         # any string — used by the CLI to authenticate
 GEMINI_API_KEY=your_gemini_key      # only needed for the Gemini concept art backend
 ```
+
+> Server auth is off by default. If you want bearer-token auth, start the server with `--auth-file tokens.json` and the CLI will prompt to save the token on first connect.
 
 ### Step 2 — Build the image
 
@@ -159,31 +160,25 @@ bash docker/build_run.sh logs
 
 ## Using the CLI
 
+quickymesh is a two-process app. Start the API server (inside Docker, or via `python api_server.py`), then launch the CLI client in a separate terminal:
+
 ```bash
-python qm_cli.py
+python main.py
 ```
 
 Connects to `http://localhost:8000` by default. To connect elsewhere:
 
 ```bash
-python qm_cli.py --server http://10.0.0.5:8000 --key your-api-key
+python main.py --server http://10.0.0.5:8000 --api-key your-api-key
 ```
 
-**Save defaults in `~/.qm_config`** (JSON) so you don't need flags every time:
+**Authentication is off by default.** To require a bearer token, start the server with `--auth-file path/to/tokens.json`. Once enabled, the CLI can pick the token up from (in order):
 
-```json
-{
-  "server": "http://localhost:8000",
-  "api_key": "your-secret-api-key-here"
-}
-```
+1. `--api-key` command-line flag
+2. `QUICKYMESH_API_KEY` environment variable
+3. Saved token file at `~/.config/quickymesh/token` (Linux/macOS) or `%APPDATA%/quickymesh/token` (Windows)
 
-Or set environment variables:
-
-```bash
-export QM_SERVER=http://localhost:8000
-export QM_API_KEY=your-secret-api-key-here
-```
+The server URL can also be set via `QUICKYMESH_SERVER`.
 
 See [CLI_MANUAL.md](CLI_MANUAL.md) for a full walkthrough of all commands and flows.
 
@@ -300,7 +295,7 @@ python -m pytest tests/ -v
          ▲ HTTP :8000
          │
 ┌────────┴──────────┐
-│   qm_cli.py       │  runs anywhere with network access (host, LAN, etc.)
+│   main.py (CLI)   │  runs anywhere with network access (host, LAN, etc.)
 └───────────────────┘
 
 Broker (SQLite tasks.db)     — crash-safe task queue, survives process crashes

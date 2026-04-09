@@ -28,6 +28,21 @@ class PatchPipelineRequest(BaseModel):
     num_polys: Optional[int] = None
     symmetrize: Optional[bool] = None
     symmetry_axis: Optional[str] = None
+    hidden: Optional[bool] = None
+
+
+class Patch3DPipelineRequest(BaseModel):
+    """
+    PATCH body for 3D pipelines.  All fields optional — only the supplied
+    fields are updated.  ``hidden`` is the only field accepted at any status;
+    the others are silently ignored once mesh generation is complete because
+    the source-of-truth poly count and symmetry come from the spawning 2D
+    pipeline (or the upload request) and rerunning requires the reject flow.
+    """
+    hidden: Optional[bool] = None
+    num_polys: Optional[int] = None
+    symmetrize: Optional[bool] = None
+    symmetry_axis: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +68,7 @@ class ModifyConceptArtRequest(BaseModel):
     """Modify one concept art image via Gemini's edit API."""
     index: int  # 0-based
     instruction: str
+    source_version: Optional[int] = None  # None = latest
 
 
 class RestyleConceptArtRequest(BaseModel):
@@ -61,6 +77,7 @@ class RestyleConceptArtRequest(BaseModel):
     positive: str
     negative: str = "blurry, low quality, text, watermark, deformed"
     denoise: float = Field(default=0.75, ge=0.1, le=1.0)
+    source_version: Optional[int] = None  # None = latest
 
 
 # ---------------------------------------------------------------------------

@@ -209,6 +209,46 @@ class TestAuth:
         assert resp.status_code == 200
 
 
+class TestAuthDisabled:
+    """When create_app is called with auth_enabled=False (the OSS default),
+    every request should be accepted and treated as a synthetic local admin."""
+
+    @pytest.fixture
+    def noauth_client(self, agent, cfg):
+        app = create_app(
+            agent=agent,
+            cfg=cfg,
+            concept_worker=MockConceptArtWorker(),
+            restyle_worker=None,
+            auth_enabled=False,
+        )
+        with TestClient(app, raise_server_exceptions=True) as c:
+            yield c
+
+    def test_no_header_succeeds(self, noauth_client):
+        resp = noauth_client.get("/api/v1/pipelines")
+        assert resp.status_code == 200
+
+    def test_garbage_header_succeeds(self, noauth_client):
+        resp = noauth_client.get(
+            "/api/v1/pipelines",
+            headers={"Authorization": "Bearer literally-anything"},
+        )
+        assert resp.status_code == 200
+
+    def test_default_is_disabled_when_no_users_file(self, agent, cfg):
+        """Without a users_file and without explicit auth_enabled, auth is OFF."""
+        app = create_app(
+            agent=agent,
+            cfg=cfg,
+            concept_worker=MockConceptArtWorker(),
+            restyle_worker=None,
+        )
+        with TestClient(app, raise_server_exceptions=True) as c:
+            resp = c.get("/api/v1/pipelines")
+            assert resp.status_code == 200
+
+
 # ===========================================================================
 # Pipelines CRUD
 # ===========================================================================
@@ -427,6 +467,47 @@ class TestConceptArtModify:
                            json={"index": 99, "instruction": "make it gold"})
         assert resp.status_code == 422
 
+    def test_modify_with_source_version_forwards_to_task(self, client, cfg, broker):
+        # Slot 0 is on version 2; seed images for both v0 and v2 on disk.
+        _seed_concept_art_image(cfg, "modpipev", 0, version=0)
+        _seed_concept_art_image(cfg, "modpipev", 0, version=2)
+        arts = [ConceptArtItem(index=0, version=2, status=ConceptArtStatus.READY)]
+        _seed_pipeline(cfg, "modpipev", status=PipelineStatus.CONCEPT_ART_REVIEW,
+                       concept_arts=arts)
+        resp = client.post(
+            "/api/v1/pipelines/modpipev/concept_art/modify",
+            headers=_AUTH,
+            json={"index": 0, "instruction": "redo", "source_version": 0},
+        )
+        assert resp.status_code == 200
+        tasks = broker.get_tasks(task_type="concept_art_modify")
+        assert len(tasks) == 1
+        assert tasks[0].payload["source_version"] == 0
+
+    def test_modify_with_bad_source_version_returns_422(self, client, cfg):
+        self._make_state_with_image(cfg)  # slot 0 at version 0
+        resp = client.post(
+            "/api/v1/pipelines/modpipe/concept_art/modify",
+            headers=_AUTH,
+            json={"index": 0, "instruction": "x", "source_version": 5},
+        )
+        assert resp.status_code == 422
+
+    def test_modify_with_missing_source_version_file_returns_404(self, client, cfg):
+        # Slot at version 2 but the v1 file is missing on disk
+        _seed_concept_art_image(cfg, "modpipemissing", 0, version=0)
+        _seed_concept_art_image(cfg, "modpipemissing", 0, version=2)
+        arts = [ConceptArtItem(index=0, version=2, status=ConceptArtStatus.READY)]
+        _seed_pipeline(cfg, "modpipemissing",
+                       status=PipelineStatus.CONCEPT_ART_REVIEW,
+                       concept_arts=arts)
+        resp = client.post(
+            "/api/v1/pipelines/modpipemissing/concept_art/modify",
+            headers=_AUTH,
+            json={"index": 0, "instruction": "x", "source_version": 1},
+        )
+        assert resp.status_code == 404
+
 
 # ===========================================================================
 # Concept art image download
@@ -498,6 +579,222 @@ class TestStatus:
         resp = client.get("/api/v1/status", headers=_AUTH)
         names = [p["name"] for p in resp.json()["pipelines"]]
         assert "statuspipe" in names
+
+
+class TestCreatePipelineFromUpload:
+    def _png_bytes(self) -> bytes:
+        import io
+        buf = io.BytesIO()
+        Image.new("RGB", (4, 4), color=(0, 255, 0)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_create_from_upload_returns_201(self, client, cfg):
+        resp = client.post(
+            "/api/v1/pipelines/from-upload",
+            headers=_AUTH,
+            data={
+                "name": "uppipe",
+                "description": "a robot",
+                "num_polys": "8000",
+                "symmetrize": "false",
+                "symmetry_axis": "x-",
+                "concept_art_backend": "gemini",
+            },
+            files={"image": ("base.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["name"] == "uppipe"
+        # File was saved into the pipeline dir
+        saved = list((cfg.pipelines_dir / "uppipe").glob("input_*.png"))
+        assert len(saved) == 1
+        assert saved[0].read_bytes() == self._png_bytes()
+
+    def test_create_from_upload_409_on_duplicate(self, client, cfg):
+        _seed_pipeline(cfg, "dup")
+        resp = client.post(
+            "/api/v1/pipelines/from-upload",
+            headers=_AUTH,
+            data={"name": "dup", "description": "x"},
+            files={"image": ("b.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 409
+
+
+class TestPatchHidden:
+    def test_patch_2d_hidden_true(self, client, cfg):
+        _seed_pipeline(cfg, "hpipe", status=PipelineStatus.CONCEPT_ART_REVIEW)
+        resp = client.patch(
+            "/api/v1/pipelines/hpipe", headers=_AUTH, json={"hidden": True}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["hidden"] is True
+
+    def test_patch_2d_hidden_allowed_when_cancelled(self, client, cfg):
+        # hidden must be settable even when the editable window is closed
+        _seed_pipeline(cfg, "hpipe2", status=PipelineStatus.CANCELLED)
+        resp = client.patch(
+            "/api/v1/pipelines/hpipe2", headers=_AUTH, json={"hidden": True}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["hidden"] is True
+
+    def test_patch_2d_description_blocked_when_cancelled(self, client, cfg):
+        _seed_pipeline(cfg, "hpipe3", status=PipelineStatus.CANCELLED)
+        resp = client.patch(
+            "/api/v1/pipelines/hpipe3", headers=_AUTH,
+            json={"description": "new"},
+        )
+        assert resp.status_code == 409
+
+    def test_patch_3d_hidden_true(self, client, cfg):
+        _seed_3d_pipeline(cfg, "h3d")
+        resp = client.patch(
+            "/api/v1/3d-pipelines/h3d", headers=_AUTH, json={"hidden": True}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["hidden"] is True
+
+    def test_patch_3d_hidden_allowed_at_idle(self, client, cfg):
+        _seed_3d_pipeline(cfg, "h3d2", status=Pipeline3DStatus.IDLE)
+        resp = client.patch(
+            "/api/v1/3d-pipelines/h3d2", headers=_AUTH, json={"hidden": True}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["hidden"] is True
+
+    def test_patch_3d_num_polys_at_awaiting(self, client, cfg):
+        _seed_3d_pipeline(cfg, "h3d3", status=Pipeline3DStatus.AWAITING_APPROVAL)
+        resp = client.patch(
+            "/api/v1/3d-pipelines/h3d3", headers=_AUTH, json={"num_polys": 1234}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["num_polys"] == 1234
+
+    def test_patch_3d_num_polys_blocked_at_idle(self, client, cfg):
+        _seed_3d_pipeline(cfg, "h3d4", status=Pipeline3DStatus.IDLE)
+        resp = client.patch(
+            "/api/v1/3d-pipelines/h3d4", headers=_AUTH, json={"num_polys": 1234}
+        )
+        assert resp.status_code == 409
+
+    def test_patch_3d_404_for_missing(self, client):
+        resp = client.patch(
+            "/api/v1/3d-pipelines/ghost", headers=_AUTH, json={"hidden": True}
+        )
+        assert resp.status_code == 404
+
+
+class TestRetry3DPipeline:
+    def test_retry_resets_failed_3d_tasks(self, client, cfg, broker):
+        _seed_3d_pipeline(cfg, "r3d")
+        tid1 = broker.enqueue("r3d", "mesh_generate", {})
+        tid2 = broker.enqueue("r3d", "mesh_texture", {})
+        broker.mark_failed(tid1, "boom")
+        broker.mark_failed(tid2, "boom")
+        resp = client.post("/api/v1/3d-pipelines/r3d/retry", headers=_AUTH)
+        assert resp.status_code == 200
+        assert resp.json()["tasks_reset"] == 2
+
+    def test_retry_404_for_missing_3d_pipeline(self, client):
+        resp = client.post("/api/v1/3d-pipelines/ghost/retry", headers=_AUTH)
+        assert resp.status_code == 404
+
+
+class TestPipelinesWithFailures:
+    def test_empty_when_no_failures(self, client):
+        resp = client.get("/api/v1/pipelines-with-failures", headers=_AUTH)
+        assert resp.status_code == 200
+        assert resp.json() == {"pipelines": []}
+
+    def test_lists_pipelines_with_failed_tasks(self, client, cfg, broker):
+        _seed_pipeline(cfg, "pa")
+        _seed_pipeline(cfg, "pb")
+        tid_a = broker.enqueue("pa", "concept_art_generate", {})
+        tid_b = broker.enqueue("pb", "concept_art_generate", {})
+        broker.mark_failed(tid_a, "boom")
+        # leave pb's task pending
+        del tid_b
+        resp = client.get("/api/v1/pipelines-with-failures", headers=_AUTH)
+        assert resp.status_code == 200
+        assert resp.json()["pipelines"] == ["pa"]
+
+    def test_excludes_cancelled_tasks(self, client, cfg, broker):
+        _seed_pipeline(cfg, "pc")
+        tid = broker.enqueue("pc", "concept_art_generate", {})
+        broker.mark_failed(tid, "cancelled")
+        resp = client.get("/api/v1/pipelines-with-failures", headers=_AUTH)
+        assert resp.json()["pipelines"] == []
+
+
+class TestTasksEndpoints:
+    def test_2d_tasks_returns_broker_tasks(self, client, cfg, broker):
+        _seed_pipeline(cfg, "tpipe")
+        broker.enqueue("tpipe", "concept_art_generate", {"foo": "bar"})
+        resp = client.get("/api/v1/pipelines/tpipe/tasks", headers=_AUTH)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["task_type"] == "concept_art_generate"
+        assert data[0]["status"] == "pending"
+        # payload must NOT be exposed
+        assert "payload" not in data[0]
+
+    def test_2d_tasks_404_for_missing_pipeline(self, client):
+        resp = client.get("/api/v1/pipelines/ghost/tasks", headers=_AUTH)
+        assert resp.status_code == 404
+
+    def test_3d_tasks_returns_broker_tasks(self, client, cfg, broker):
+        _seed_3d_pipeline(cfg, "t3d")
+        broker.enqueue("t3d", "mesh_generate", {})
+        broker.enqueue("t3d", "mesh_texture", {})
+        resp = client.get("/api/v1/3d-pipelines/t3d/tasks", headers=_AUTH)
+        assert resp.status_code == 200
+        types = sorted(t["task_type"] for t in resp.json())
+        assert types == ["mesh_generate", "mesh_texture"]
+
+    def test_3d_tasks_404_for_missing_pipeline(self, client):
+        resp = client.get("/api/v1/3d-pipelines/ghost/tasks", headers=_AUTH)
+        assert resp.status_code == 404
+
+
+class TestConfig:
+    def test_config_returns_expected_keys(self, client):
+        resp = client.get("/api/v1/config", headers=_AUTH)
+        assert resp.status_code == 200
+        data = resp.json()
+        for key in (
+            "output_root",
+            "pipelines_dir",
+            "final_assets_dir",
+            "background_suffix",
+            "num_polys_default",
+            "num_concept_arts_default",
+            "concept_art_image_size",
+            "export_format",
+            "gemini_api_key_present",
+        ):
+            assert key in data, f"missing key: {key}"
+
+    def test_config_never_returns_api_key(self, client):
+        resp = client.get("/api/v1/config", headers=_AUTH)
+        body = resp.text
+        data = resp.json()
+        # The fake config fixture sets GEMINI_API_KEY=fake; ensure that value
+        # never appears in the response payload, and no key field other than
+        # the boolean presence flag is exposed.
+        assert "fake" not in body
+        assert "gemini_api_key" not in data
+        assert "api_key" not in data
+        assert data["gemini_api_key_present"] in (True, False)
+
+    def test_config_gemini_present_reflects_env(self, client, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "x")
+        resp = client.get("/api/v1/config", headers=_AUTH)
+        assert resp.json()["gemini_api_key_present"] is True
+        monkeypatch.delenv("GEMINI_API_KEY")
+        resp = client.get("/api/v1/config", headers=_AUTH)
+        assert resp.json()["gemini_api_key_present"] is False
 
 
 # ===========================================================================
@@ -690,6 +987,27 @@ class TestCreate3DPipelineFromRef:
         })
         assert resp.status_code == 201
         assert resp.json()["status"] == "queued"
+
+    def test_copies_source_image_into_3d_dir(self, client, cfg):
+        """
+        The 3D pipeline must own its own copy of the source image so it is
+        decoupled from any later changes to the 2D pipeline's concept art
+        folder (regenerate, delete, etc.).
+        """
+        self._setup_2d(cfg)
+        resp = client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={
+            "pipeline_name": "mypipe",
+            "concept_art_index": 0,
+        })
+        assert resp.status_code == 201
+        name_3d = "mypipe_1_0"
+        pipeline_dir_3d = cfg.pipelines_dir / name_3d
+        copied = pipeline_dir_3d / "source_concept_art_1_0.png"
+        assert copied.exists(), f"Expected source image copied to {copied}"
+        # State must reference the copied path, not the original 2D path.
+        state_data = resp.json()
+        assert state_data["input_image_path"] == str(copied)
+        assert "pipelines/mypipe/concept_art" not in state_data["input_image_path"].replace("\\", "/")
 
     def test_missing_2d_pipeline_returns_404(self, client, cfg):
         resp = client.post("/api/v1/3d-pipelines/from-ref", headers=_AUTH, json={

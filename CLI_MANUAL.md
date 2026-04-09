@@ -1,33 +1,22 @@
 # quickymesh CLI Manual
 
-`qm_cli.py` is the command-line client for the quickymesh pipeline. It communicates with the quickymesh API server over HTTP — you can run it on the same machine as the server or point it at a remote one.
+`main.py` is the command-line client for the quickymesh pipeline. It communicates with the quickymesh API server over HTTP — you can run it on the same machine as the server or point it at a remote one.
 
 ---
 
 ## Starting the CLI
 
 ```bash
-python qm_cli.py
+python main.py
 ```
 
-On first run you'll need an API key. The CLI looks for it in this order:
+By default the server runs with **authentication disabled**, so no API key is needed. If the server was started with `--auth-file tokens.json`, the CLI resolves the bearer token in this order:
 
-1. `--key` flag
-2. `QM_API_KEY` environment variable
-3. `~/.qm_config` file (`"api_key"` key)
+1. `--api-key` flag
+2. `QUICKYMESH_API_KEY` environment variable
+3. Saved token file at `~/.config/quickymesh/token` (Linux/macOS) or `%APPDATA%/quickymesh/token` (Windows)
 
-Similarly for the server URL (`--server`, `QM_SERVER`, or `~/.qm_config` `"server"` key). Default server is `http://localhost:8000`.
-
-### Saving defaults
-
-Create `~/.qm_config` so you never need flags:
-
-```json
-{
-  "server": "http://localhost:8000",
-  "api_key": "your-secret-api-key-here"
-}
-```
+Similarly for the server URL: `--server`, then `QUICKYMESH_SERVER`, then default `http://localhost:8000`.
 
 ---
 
@@ -284,7 +273,7 @@ The status line updates whenever any per-image status changes. Press `q` + Enter
 ## Tips
 
 - **Multiple pipelines:** Start several pipelines and they all run concurrently. The CLI shows whichever needs attention next.
-- **Disconnect and reconnect:** The server keeps running after you exit `qm_cli.py`. Reconnect later with `python qm_cli.py` and your pipelines will still be there.
+- **Disconnect and reconnect:** The server keeps running after you exit the CLI. Reconnect later with `python main.py` and your pipelines will still be there.
 - **Check the review sheet first:** The 6-angle screenshot review sheet opens automatically. But open `preview.html` in a browser for an interactive 3-D view before approving.
 - **Reject to iterate:** Rejected meshes automatically re-queue with the same (or updated) settings. You can reject many times — there's no limit.
 - **VRAM lock:** Only one GPU-heavy task runs at a time. If Trellis is generating, FLUX concept art generation waits. This prevents out-of-memory errors.

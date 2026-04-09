@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from src.api.auth import load_users
+from src.api.auth import load_users, set_auth_enabled
 from src.api.event_bus import event_bus
 
 if TYPE_CHECKING:
@@ -34,6 +34,7 @@ def create_app(
     restyle_worker=None,
     *,
     users_file: str | None = None,
+    auth_enabled: bool | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application.
@@ -44,7 +45,9 @@ def create_app(
     cfg:            Application config.
     concept_worker: The active concept art worker (Gemini or FLUX).
     restyle_worker: Optional ControlNetRestyleWorker.
-    users_file:     Path to users.yaml.  Defaults to auto-detection in auth.py.
+    users_file:     Path to users.yaml.  If provided, auth is auto-enabled.
+    auth_enabled:   Force auth on/off.  If None, auth is enabled iff a
+                    users_file is provided.  Default for OSS / localhost is OFF.
     """
 
     @asynccontextmanager
@@ -62,8 +65,16 @@ def create_app(
         lifespan=lifespan,
     )
 
-    # Load authentication users
-    load_users(users_file)
+    # Auth is OFF by default (single-user/localhost).  Auto-enable when a
+    # users file is supplied, unless explicitly overridden.
+    if auth_enabled is None:
+        auth_enabled = users_file is not None
+    set_auth_enabled(auth_enabled)
+    if auth_enabled:
+        load_users(users_file)
+        log.info("Auth: ENABLED")
+    else:
+        log.info("Auth: DISABLED (all requests treated as local admin)")
 
     # Store shared state on app so routers can access it via request.app.state
     app.state.agent = agent

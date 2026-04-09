@@ -311,7 +311,11 @@ class TestComfyUITrellisWorker:
 
         worker = ComfyUITrellisWorker(mock_client, output_dir, wf_gen, wf_tex, seed=0)
         worker.generate_mesh(img, tmp_path / "dest", num_polys=5000, job_id="test_job")
-        mock_client.upload_image.assert_called_once_with(img)
+        # Uploads are job-scoped so different pipelines can't collide on
+        # ComfyUI's shared /input directory.
+        mock_client.upload_image.assert_called_once_with(
+            img, server_name="test_job__img.png",
+        )
 
     def test_generate_calls_run_workflow(self, tmp_path):
         from PIL import Image
@@ -388,6 +392,10 @@ class TestComfyUITrellisWorker:
             v for v in submitted.values()
             if isinstance(v, dict) and v.get("class_type") == "Trellis2LoadMesh"
         )
-        # GLB is uploaded via ComfyUI API; worker passes the returned server filename
-        mock_client.upload_image.assert_called_with(mesh)
+        # GLB is uploaded via ComfyUI API with a job-scoped server name so
+        # different pipelines can't collide on /input (every 3D pipeline
+        # produces an `initial_mesh.glb` with an identical basename).
+        mock_client.upload_image.assert_any_call(
+            mesh, server_name="myjob__mesh.glb",
+        )
         assert load_mesh["inputs"]["glb_path"] == "uploaded.png"

@@ -5,12 +5,15 @@ services:
   #
   # Ports:
   #   8190 — ComfyUI web UI and API
-  #   8000 — quickymesh REST API (used by qm_cli.py and future web UI)
+  #   8000 — quickymesh REST API (used by the main.py CLI and future web UI)
   #
   # Required env vars (set in docker/.env):
-  #   API_KEY          — API key for the quickymesh server (single-user mode)
-  #                      Or create users.yaml and mount it (see below)
   #   GEMINI_API_KEY   — Gemini API key (if using the Gemini concept art backend)
+  #
+  # Optional — authentication:
+  #   API_KEY          — bearer token for single-user auth mode. If unset, the
+  #                      server runs with auth disabled.  Or create users.yaml
+  #                      and mount it (see below) for multi-user mode.
   #
   # Optional env vars:
   #   TRELLIS_MODELS_DIR   — host path to a shared models folder (~40 GB)
@@ -41,7 +44,7 @@ services:
       # ---- quickymesh source code (live reload — no rebuild needed for code changes) ----
       - ../src:/quickymesh/src
       - ../api_server.py:/quickymesh/api_server.py
-      - ../qm_cli.py:/quickymesh/qm_cli.py
+      - ../main.py:/quickymesh/main.py
       - ../defaults.yaml:/quickymesh/defaults.yaml
       - ../comfyui_workflows:/quickymesh/comfyui_workflows
       - ../blender_scripts:/quickymesh/blender_scripts

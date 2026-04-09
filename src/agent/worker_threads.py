@@ -32,6 +32,21 @@ log = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 1.0   # seconds between task-queue polls when idle
 
+# All 3D pipeline task types.  TrellisWorkerThread and ScreenshotWorkerThread
+# both pass this as their `workflow_types` to claim_next so the broker can
+# enforce per-pipeline FIFO across the full 3D workflow.  Without this, two
+# workers running in parallel would interleave pipelines (e.g. TrellisWorker
+# starts pipeline B's mesh_generate while pipeline A is still in
+# mesh_cleanup/screenshot on ScreenshotWorker).
+_WORKFLOW_3D = ["mesh_generate", "mesh_texture", "mesh_cleanup", "screenshot"]
+
+# Concept art workflow: all types handled by ConceptArtWorkerThread.
+_WORKFLOW_CONCEPT_ART = [
+    "concept_art_generate",
+    "concept_art_modify",
+    "concept_art_restyle",
+]
+
 
 def _notify_review_ready(pipeline_name: str, review_type: str) -> None:
     """Publish an SSE event to notify connected clients that review is ready."""
@@ -60,6 +75,7 @@ class _BaseWorkerThread(threading.Thread):
     """
 
     task_types: list[str] = []
+    workflow_types: list[str] | None = None
 
     def __init__(
         self,
@@ -77,7 +93,7 @@ class _BaseWorkerThread(threading.Thread):
     def run(self) -> None:
         log.debug("%s started", self.__class__.__name__)
         while not self._stop.is_set():
-            task = self._broker.claim_next(self.task_types)
+            task = self._broker.claim_next(self.task_types, self.workflow_types)
             if task is None:
                 self._stop.wait(self._poll)
                 continue
@@ -102,15 +118,24 @@ class _BaseWorkerThread(threading.Thread):
 
 class ConceptArtWorkerThread(_BaseWorkerThread):
     """
-    Handles concept_art_generate tasks for 2D pipelines.
+    Handles concept-art tasks for 2D pipelines.
 
     Payload keys
     ------------
     concept_art_generate:
         pipeline_name, state_path, indices (optional list[int])
+    concept_art_modify:
+        pipeline_name, state_path, index, instruction
+    concept_art_restyle:
+        pipeline_name, state_path, index, positive, negative, denoise
     """
 
-    task_types = ["concept_art_generate", "concept_art_modify"]
+    task_types = [
+        "concept_art_generate",
+        "concept_art_modify",
+        "concept_art_restyle",
+    ]
+    workflow_types = _WORKFLOW_CONCEPT_ART
 
     def __init__(
         self,
@@ -120,11 +145,13 @@ class ConceptArtWorkerThread(_BaseWorkerThread):
         cfg: "Config",
         *,
         flux_worker: "ConceptArtWorker | None" = None,
+        restyle_worker: "ConceptArtWorker | None" = None,
         **kwargs,
     ) -> None:
         super().__init__(broker, stop_event, **kwargs)
         self._worker = worker
         self._flux_worker = flux_worker
+        self._restyle_worker = restyle_worker
         self._cfg = cfg
 
     def _pick_worker(self, state) -> "ConceptArtWorker":
@@ -133,26 +160,76 @@ class ConceptArtWorkerThread(_BaseWorkerThread):
         return self._worker
 
     def _handle_task(self, task) -> None:
+        from src.api.event_bus import event_bus
         from src.concept_art_pipeline import (
             generate_concept_arts,
+            modify_concept_art,
             regenerate_concept_arts,
+            restyle_concept_art,
         )
         from src.state import PipelineState
 
         state_path = Path(task.payload["state_path"])
         state = PipelineState.load(state_path)
         pipeline_dir = state_path.parent
-        worker = self._pick_worker(state)
 
         if task.task_type == "concept_art_generate":
+            worker = self._pick_worker(state)
             indices = task.payload.get("indices")
             if indices is None:
                 generate_concept_arts(state, worker, pipeline_dir, self._cfg)
             else:
                 regenerate_concept_arts(state, worker, pipeline_dir, indices, self._cfg)
+            state.concept_art_sheet_shown = False
+            state.save(state_path)
             _notify_review_ready(state.name, "concept art")
+            return
 
-        state.save(state_path)
+        if task.task_type == "concept_art_modify":
+            index = int(task.payload["index"])
+            instruction = task.payload["instruction"]
+            source_version = task.payload.get("source_version")
+            # Modify uses the same backend worker as initial generation
+            # (must be Gemini — the endpoint enforces supports_modify).
+            worker = self._pick_worker(state)
+            modify_concept_art(
+                state, worker, pipeline_dir, index, instruction,
+                source_version=source_version,
+            )
+            state.concept_art_sheet_shown = False
+            state.save(state_path)
+            event_bus.publish({
+                "event": "concept_art_updated",
+                "pipeline": state.name,
+                "index": index,
+            })
+            _notify_review_ready(state.name, "concept art")
+            return
+
+        if task.task_type == "concept_art_restyle":
+            if self._restyle_worker is None:
+                raise RuntimeError(
+                    "concept_art_restyle task claimed but no restyle_worker is configured"
+                )
+            index = int(task.payload["index"])
+            positive = task.payload["positive"]
+            negative = task.payload["negative"]
+            denoise = float(task.payload["denoise"])
+            source_version = task.payload.get("source_version")
+            restyle_concept_art(
+                state, self._restyle_worker, pipeline_dir,
+                index, positive, negative, denoise,
+                source_version=source_version,
+            )
+            state.concept_art_sheet_shown = False
+            state.save(state_path)
+            event_bus.publish({
+                "event": "concept_art_updated",
+                "pipeline": state.name,
+                "index": index,
+            })
+            _notify_review_ready(state.name, "concept art")
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +248,7 @@ class TrellisWorkerThread(_BaseWorkerThread):
     """
 
     task_types = ["mesh_texture", "mesh_generate"]  # texture preferred: finish one pipeline before starting another
+    workflow_types = _WORKFLOW_3D
 
     def __init__(
         self,
@@ -233,6 +311,7 @@ class ScreenshotWorkerThread(_BaseWorkerThread):
     """
 
     task_types = ["mesh_cleanup", "screenshot"]
+    workflow_types = _WORKFLOW_3D
 
     def __init__(
         self,

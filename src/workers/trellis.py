@@ -126,7 +126,16 @@ class ComfyUITrellisWorker(TrellisWorker):
             seed = self._seed if self._seed is not None else random.randint(0, 2**31 - 1)
             log.info(f"[generate_mesh] attempt {attempt}/{MAX_RETRIES}, seed={seed}, job={job_id}")
 
-            server_image = self._client.upload_image(image_path)
+            # Job-scoped server filename: different pipelines produce files
+            # with identical basenames (e.g. every 2D pipeline has its own
+            # concept_art_1_0.png), so we must namespace uploads or they
+            # clobber each other on ComfyUI's shared /input/ directory —
+            # and ComfyUI's node cache keys off the filename, so stale
+            # results can bleed across pipelines.
+            server_image = self._client.upload_image(
+                image_path,
+                server_name=f"{job_id}__{image_path.name}",
+            )
             workflow = _inject_generate_params(
                 self._base_generate,
                 image_name=server_image,
@@ -168,8 +177,15 @@ class ComfyUITrellisWorker(TrellisWorker):
             seed = self._seed if self._seed is not None else random.randint(0, 2**31 - 1)
             log.info(f"[texture_mesh] attempt {attempt}/{MAX_RETRIES}, seed={seed}, job={job_id}")
 
-            server_image = self._client.upload_image(image_path)
-            server_glb = self._client.upload_image(mesh_path)
+            # Job-scoped names — see generate_mesh above for rationale.
+            server_image = self._client.upload_image(
+                image_path,
+                server_name=f"{job_id}__{image_path.name}",
+            )
+            server_glb = self._client.upload_image(
+                mesh_path,
+                server_name=f"{job_id}__{mesh_path.name}",
+            )
             workflow = _inject_texture_params(
                 self._base_texture,
                 image_name=server_image,

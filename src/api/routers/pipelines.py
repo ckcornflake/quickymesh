@@ -1,11 +1,13 @@
 """
 Pipeline CRUD endpoints.
 
-POST   /pipelines                   Create new pipeline
+POST   /pipelines                   Create new pipeline (JSON)
+POST   /pipelines/from-upload       Create new pipeline with an uploaded base
+                                    image (multipart/form-data)
 GET    /pipelines                   List pipelines (user's own; admin sees all)
 GET    /pipelines/{name}            Get pipeline state
 DELETE /pipelines/{name}            Cancel pipeline
-PATCH  /pipelines/{name}            Edit (description, polys, symmetry)
+PATCH  /pipelines/{name}            Edit (description, polys, symmetry, hidden)
 POST   /pipelines/{name}/pause      Pause
 POST   /pipelines/{name}/resume     Resume
 POST   /pipelines/{name}/retry      Retry failed tasks
@@ -14,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 
 from src.api.auth import CurrentUser
 from src.api.event_bus import event_bus
@@ -90,6 +92,62 @@ async def create_pipeline(
     return state.model_dump(mode="json")
 
 
+@router.post("/pipelines/from-upload", status_code=status.HTTP_201_CREATED)
+async def create_pipeline_from_upload(
+    request: Request,
+    user: CurrentUser,
+    name: str = Form(...),
+    description: str = Form(...),
+    num_polys: int | None = Form(None),
+    symmetrize: bool = Form(False),
+    symmetry_axis: str = Form("x-"),
+    concept_art_backend: str = Form("gemini"),
+    image: UploadFile = File(...),
+):
+    """
+    Start a new 2D pipeline using an uploaded base image.
+
+    The image is saved into the pipeline directory and its server-side path
+    is passed as ``input_image_path`` to the agent — the same code path as
+    the JSON ``POST /pipelines`` endpoint with ``input_image_path`` set, but
+    without requiring the client to know any server-side filesystem layout.
+    """
+    agent = _agent(request)
+    cfg = _cfg(request)
+
+    existing = agent.get_pipeline_state(name)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Pipeline '{name}' already exists",
+        )
+
+    # Persist the upload into the pipeline directory before starting.
+    pipeline_dir = cfg.pipelines_dir / name
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    img_path = pipeline_dir / f"input_{image.filename}"
+    contents = await image.read()
+    img_path.write_bytes(contents)
+
+    state = agent.start_pipeline(
+        name,
+        description,
+        num_polys,
+        input_image_path=str(img_path),
+        symmetrize=symmetrize,
+        symmetry_axis=symmetry_axis,
+        concept_art_backend=concept_art_backend,
+    )
+    log.info("Pipeline '%s' created from upload by user '%s'", name, user.username)
+    event_bus.publish({
+        "event": "pipeline_created",
+        "pipeline": name,
+        "status": state.status.value,
+        "user": user.username,
+    })
+    return state.model_dump(mode="json")
+
+
 # ---------------------------------------------------------------------------
 # List
 # ---------------------------------------------------------------------------
@@ -158,29 +216,46 @@ async def patch_pipeline(
     request: Request,
     user: CurrentUser,
 ):
-    """Edit pipeline settings. Only allowed before mesh generation starts."""
+    """
+    Edit pipeline settings.
+
+    ``hidden`` may be toggled at any status.  All other fields (description,
+    num_polys, symmetrize, symmetry_axis) require the pipeline to still be in
+    the editable window (before mesh generation starts) and a 409 is returned
+    if any non-hidden field is supplied past that point.
+    """
     from src.state import SymmetryAxis
 
     state = _load_state(name, request)
-    _editable = {
-        PipelineStatus.INITIALIZING,
-        PipelineStatus.CONCEPT_ART_GENERATING,
-        PipelineStatus.CONCEPT_ART_REVIEW,
-    }
-    if state.status not in _editable:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Cannot edit pipeline in status '{state.status.value}' (editing only allowed before mesh generation)",
-        )
-    if req.description is not None:
-        state.description = req.description
-    if req.num_polys is not None:
-        state.num_polys = req.num_polys
-    if req.symmetrize is not None:
-        state.symmetrize = req.symmetrize
-    if req.symmetry_axis is not None:
-        state.symmetry_axis = SymmetryAxis(req.symmetry_axis)
     state_path = _state_path(name, request)
+
+    # ``hidden`` is always allowed.
+    if req.hidden is not None:
+        state.hidden = req.hidden
+
+    non_hidden_fields = (
+        req.description, req.num_polys, req.symmetrize, req.symmetry_axis,
+    )
+    if any(f is not None for f in non_hidden_fields):
+        _editable = {
+            PipelineStatus.INITIALIZING,
+            PipelineStatus.CONCEPT_ART_GENERATING,
+            PipelineStatus.CONCEPT_ART_REVIEW,
+        }
+        if state.status not in _editable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot edit pipeline in status '{state.status.value}' (editing only allowed before mesh generation)",
+            )
+        if req.description is not None:
+            state.description = req.description
+        if req.num_polys is not None:
+            state.num_polys = req.num_polys
+        if req.symmetrize is not None:
+            state.symmetrize = req.symmetrize
+        if req.symmetry_axis is not None:
+            state.symmetry_axis = SymmetryAxis(req.symmetry_axis)
+
     state.save(state_path)
     return state.model_dump(mode="json")
 
@@ -228,3 +303,32 @@ async def retry_pipeline(name: str, request: Request, user: CurrentUser):
     _load_state(name, request)  # ensure exists
     count = agent._broker.retry_failed_tasks(name)
     return {"status": "ok", "tasks_reset": count}
+
+
+# ---------------------------------------------------------------------------
+# Broker tasks (per-pipeline) — used by the CLI status / watch displays
+# ---------------------------------------------------------------------------
+
+
+@router.get("/pipelines/{name}/tasks")
+async def get_pipeline_tasks(name: str, request: Request, user: CurrentUser):
+    """
+    Return all broker tasks for a 2D pipeline.
+
+    Each task is serialised as ``{id, task_type, status, error}``.  This is the
+    minimum the CLI needs to render queue depth and failure indicators in the
+    status / watch views.  ``payload`` is intentionally omitted to keep the
+    response small and avoid leaking server-internal fields.
+    """
+    _load_state(name, request)  # 404 if missing
+    agent = _agent(request)
+    tasks = agent._broker.get_tasks(pipeline_name=name)
+    return [
+        {
+            "id": t.id,
+            "task_type": t.task_type,
+            "status": t.status,
+            "error": t.error,
+        }
+        for t in tasks
+    ]

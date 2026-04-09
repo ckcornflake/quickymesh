@@ -13,11 +13,14 @@ run_mesh_export(state, pipeline_dir, cfg) -> None
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from src.config import Config, config as _default_config
 from src.state import Pipeline3DState, Pipeline3DStatus
 from src.workers.trellis import TrellisWorker
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +47,10 @@ def run_mesh_generation(
     mesh_dir.mkdir(parents=True, exist_ok=True)
 
     state.status = Pipeline3DStatus.GENERATING_MESH
+    log.info(
+        "run_mesh_generation('%s') — input image: %s",
+        state.name, state.input_image_path,
+    )
     glb = worker.generate_mesh(
         image_path=Path(state.input_image_path),
         dest_dir=mesh_dir,

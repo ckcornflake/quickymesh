@@ -87,6 +87,7 @@ class PipelineAgent:
         screenshot_worker: "ScreenshotWorker",
         *,
         flux_concept_worker: "ConceptArtWorker | None" = None,
+        restyle_worker: "ConceptArtWorker | None" = None,
         poll_interval: float = 1.0,
     ) -> None:
         self._broker = broker
@@ -94,6 +95,7 @@ class PipelineAgent:
         self._cfg = cfg
         self._concept_worker = concept_worker
         self._flux_concept_worker = flux_concept_worker
+        self._restyle_worker = restyle_worker
         self._trellis_worker = trellis_worker
         self._screenshot_worker = screenshot_worker
         self._poll_interval = poll_interval
@@ -126,6 +128,7 @@ class PipelineAgent:
                 self._concept_worker,
                 self._cfg,
                 flux_worker=self._flux_concept_worker,
+                restyle_worker=self._restyle_worker,
                 poll_interval=self._poll_interval,
             ),
             TrellisWorkerThread(

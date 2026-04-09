@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
@@ -30,6 +31,7 @@ from src.api.models import (
     Create3DPipelineFromRefRequest,
     Create3DPipelineFromUploadRequest,
     OkResponse,
+    Patch3DPipelineRequest,
     RejectMeshRequest,
 )
 from src.state import Pipeline3DState, Pipeline3DStatus
@@ -111,9 +113,19 @@ async def create_3d_pipeline_from_ref(
             ),
         )
 
+    # Copy the source image into the 3D pipeline's own directory so the 3D
+    # pipeline is decoupled from the 2D pipeline's evolving concept art
+    # folder.  This prevents any possibility of the 3D pipeline picking up
+    # a different image if the 2D pipeline is regenerated, deleted, or
+    # otherwise modified after the 3D pipeline is created.
+    pipeline_dir_3d = cfg.pipelines_dir / name_3d
+    pipeline_dir_3d.mkdir(parents=True, exist_ok=True)
+    copied_img_path = pipeline_dir_3d / f"source_{img_path.name}"
+    shutil.copy2(str(img_path), str(copied_img_path))
+
     state = agent.start_3d_pipeline(
         name=name_3d,
-        input_image_path=str(img_path),
+        input_image_path=str(copied_img_path),
         num_polys=req.num_polys,
         source_2d_pipeline=req.pipeline_name,
         source_concept_art_index=idx,
@@ -121,7 +133,11 @@ async def create_3d_pipeline_from_ref(
         symmetrize=req.symmetrize,
         symmetry_axis=req.symmetry_axis,
     )
-    log.info("3D pipeline '%s' created from 2D ref by user '%s'", name_3d, user.username)
+    log.info(
+        "3D pipeline '%s' created from 2D ref by user '%s' "
+        "(source: %s  →  %s)",
+        name_3d, user.username, img_path, copied_img_path,
+    )
     event_bus.publish({"event": "pipeline_3d_created", "pipeline": name_3d})
     return state.model_dump(mode="json")
 
@@ -204,6 +220,54 @@ async def get_3d_pipeline(name: str, request: Request, user: CurrentUser):
 # ---------------------------------------------------------------------------
 # Cancel
 # ---------------------------------------------------------------------------
+
+
+@router.patch("/3d-pipelines/{name}")
+async def patch_3d_pipeline(
+    name: str,
+    req: Patch3DPipelineRequest,
+    request: Request,
+    user: CurrentUser,
+):
+    """
+    Edit a 3D pipeline's settings.
+
+    ``hidden`` may be toggled at any status.  ``num_polys`` / ``symmetrize`` /
+    ``symmetry_axis`` are only accepted while the pipeline is queued or
+    awaiting approval — past that point the regenerate flow (POST .../reject)
+    is the supported way to change generation parameters.
+    """
+    from src.state import SymmetryAxis
+
+    state, pipeline_dir = _load_3d_state(name, request)
+    state_path = pipeline_dir / "state.json"
+
+    if req.hidden is not None:
+        state.hidden = req.hidden
+
+    non_hidden_fields = (req.num_polys, req.symmetrize, req.symmetry_axis)
+    if any(f is not None for f in non_hidden_fields):
+        _editable = {
+            Pipeline3DStatus.QUEUED,
+            Pipeline3DStatus.AWAITING_APPROVAL,
+        }
+        if state.status not in _editable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Cannot edit generation params for 3D pipeline in status "
+                    f"'{state.status.value}' — use the reject/regenerate flow instead."
+                ),
+            )
+        if req.num_polys is not None:
+            state.num_polys = req.num_polys
+        if req.symmetrize is not None:
+            state.symmetrize = req.symmetrize
+        if req.symmetry_axis is not None:
+            state.symmetry_axis = SymmetryAxis(req.symmetry_axis)
+
+    state.save(state_path)
+    return state.model_dump(mode="json")
 
 
 @router.delete("/3d-pipelines/{name}")
@@ -361,3 +425,34 @@ async def reject_3d_mesh(
     })
     log.info("3D pipeline '%s' rejected by user '%s'", name, user.username)
     return OkResponse()
+
+
+# ---------------------------------------------------------------------------
+# Broker tasks (per-pipeline) — used by the CLI status / watch displays
+# ---------------------------------------------------------------------------
+
+
+@router.post("/3d-pipelines/{name}/retry")
+async def retry_3d_pipeline(name: str, request: Request, user: CurrentUser):
+    """Reset failed broker tasks for a 3D pipeline so workers will retry them."""
+    _load_3d_state(name, request)  # 404 if missing
+    agent = _agent(request)
+    count = agent._broker.retry_failed_tasks(name)
+    return {"status": "ok", "tasks_reset": count}
+
+
+@router.get("/3d-pipelines/{name}/tasks")
+async def get_3d_pipeline_tasks(name: str, request: Request, user: CurrentUser):
+    """Return all broker tasks for a 3D pipeline.  See GET /pipelines/{name}/tasks."""
+    _load_3d_state(name, request)  # 404 if missing
+    agent = _agent(request)
+    tasks = agent._broker.get_tasks(pipeline_name=name)
+    return [
+        {
+            "id": t.id,
+            "task_type": t.task_type,
+            "status": t.status,
+            "error": t.error,
+        }
+        for t in tasks
+    ]

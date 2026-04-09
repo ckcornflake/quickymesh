@@ -30,8 +30,24 @@ _bearer = HTTPBearer(auto_error=False)
 # api_key → {"username": ..., "role": ...}
 _users: dict[str, dict] = {}
 
+# When False, _get_current_user bypasses all checks and returns a synthetic
+# admin user.  This is the default for OSS / single-user / localhost setups.
+# Enable by passing `auth_enabled=True` (or a `users_file`) to create_app, or
+# via the api_server.py --auth-file CLI flag.
+_auth_enabled: bool = False
+
 
 _log = logging.getLogger(__name__)
+
+
+def set_auth_enabled(enabled: bool) -> None:
+    """Toggle whether _get_current_user enforces credentials."""
+    global _auth_enabled
+    _auth_enabled = enabled
+
+
+def is_auth_enabled() -> bool:
+    return _auth_enabled
 
 
 def load_users(users_file: str | Path | None = None) -> None:
@@ -79,6 +95,8 @@ class User:
 def _get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> User:
+    if not _auth_enabled:
+        return User("local", "admin")
     if credentials is None:
         _log.warning("Auth failure: missing Authorization header")
         raise HTTPException(

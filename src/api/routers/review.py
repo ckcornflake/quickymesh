@@ -15,7 +15,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from src.api.auth import CurrentUser
@@ -23,7 +23,6 @@ from src.api.event_bus import event_bus
 from src.api.models import (
     AcceptedResponse,
     ModifyConceptArtRequest,
-    OkResponse,
     RegenerateConceptArtRequest,
     RestyleConceptArtRequest,
 )
@@ -58,6 +57,32 @@ def _load_state(name: str, request: Request) -> tuple[PipelineState, Path]:
         raise HTTPException(status_code=404, detail=f"Pipeline '{name}' not found")
     pipeline_dir = cfg.pipelines_dir / name
     return state, pipeline_dir
+
+
+def _validate_source_version(
+    state: PipelineState,
+    pipeline_dir: Path,
+    index: int,
+    source_version: int,
+) -> None:
+    """Ensure the requested older version exists on disk, else raise 422."""
+    from src.concept_art_pipeline import _concept_art_path
+
+    item = state.concept_arts[index]
+    if source_version < 0 or source_version > item.version:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"source_version {source_version} out of range for slot "
+                f"{index} (latest is {item.version})"
+            ),
+        )
+    img_path = _concept_art_path(pipeline_dir, index, source_version)
+    if not img_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Slot {index} version {source_version} image not found on disk",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +178,14 @@ async def modify_concept_art(
     request: Request,
     user: CurrentUser,
 ):
-    """Modify one concept art image via Gemini's edit API (runs synchronously)."""
-    from src.concept_art_pipeline import modify_concept_art as _modify
+    """
+    Queue a Gemini-edit modification of one concept art image.
 
+    Returns immediately after enqueuing.  The caller should poll the pipeline
+    state — the targeted concept art will have status ``regenerating`` until
+    the worker finishes.
+    """
+    agent = _agent(request)
     state, pipeline_dir = _load_state(name, request)
     state_path = pipeline_dir / "state.json"
     concept_worker = request.app.state.concept_worker
@@ -166,19 +196,39 @@ async def modify_concept_art(
             detail="Image modification is not supported by the current concept art backend",
         )
 
-    try:
-        await asyncio.to_thread(_modify, state, concept_worker, pipeline_dir, req.index, req.instruction)
-    except (IndexError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    if req.index < 0 or req.index >= len(state.concept_arts):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Concept art index {req.index} out of range",
+        )
 
+    if req.source_version is not None:
+        _validate_source_version(state, pipeline_dir, req.index, req.source_version)
+
+    # Flip status so polling clients see the work is in flight.
+    state.concept_arts[req.index].status = ConceptArtStatus.REGENERATING
     state.concept_art_sheet_shown = False
     state.save(state_path)
+
+    agent._broker.enqueue(
+        name,
+        "concept_art_modify",
+        {
+            "pipeline_name": name,
+            "state_path": str(state_path),
+            "index": req.index,
+            "instruction": req.instruction,
+            "source_version": req.source_version,
+        },
+    )
     event_bus.publish({
-        "event": "concept_art_updated",
+        "event": "status_change",
         "pipeline": name,
-        "index": req.index,
+        "status": "concept_art_generating",
+        "message": f"Modifying image {req.index + 1}.",
     })
-    return OkResponse()
+    log.info("Concept art modify queued for '%s' index=%d", name, req.index)
+    return AcceptedResponse(message=f"Modifying image {req.index + 1}")
 
 
 @router.post("/pipelines/{name}/concept_art/restyle")
@@ -188,9 +238,14 @@ async def restyle_concept_art(
     request: Request,
     user: CurrentUser,
 ):
-    """Restyle one concept art image via ControlNet Canny (runs synchronously)."""
-    from src.concept_art_pipeline import restyle_concept_art as _restyle
+    """
+    Queue a ControlNet Canny restyle of one concept art image.
 
+    Returns immediately after enqueuing.  The caller should poll the pipeline
+    state — the targeted concept art will have status ``regenerating`` until
+    the worker finishes.
+    """
+    agent = _agent(request)
     restyle_worker = request.app.state.restyle_worker
     if restyle_worker is None:
         raise HTTPException(
@@ -201,19 +256,37 @@ async def restyle_concept_art(
     state, pipeline_dir = _load_state(name, request)
     state_path = pipeline_dir / "state.json"
 
-    try:
-        await asyncio.to_thread(
-            _restyle, state, restyle_worker, pipeline_dir,
-            req.index, req.positive, req.negative, req.denoise,
+    if req.index < 0 or req.index >= len(state.concept_arts):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Concept art index {req.index} out of range",
         )
-    except (IndexError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
 
+    if req.source_version is not None:
+        _validate_source_version(state, pipeline_dir, req.index, req.source_version)
+
+    state.concept_arts[req.index].status = ConceptArtStatus.REGENERATING
     state.concept_art_sheet_shown = False
     state.save(state_path)
+
+    agent._broker.enqueue(
+        name,
+        "concept_art_restyle",
+        {
+            "pipeline_name": name,
+            "state_path": str(state_path),
+            "index": req.index,
+            "positive": req.positive,
+            "negative": req.negative,
+            "denoise": req.denoise,
+            "source_version": req.source_version,
+        },
+    )
     event_bus.publish({
-        "event": "concept_art_updated",
+        "event": "status_change",
         "pipeline": name,
-        "index": req.index,
+        "status": "concept_art_generating",
+        "message": f"Restyling image {req.index + 1}.",
     })
-    return OkResponse()
+    log.info("Concept art restyle queued for '%s' index=%d", name, req.index)
+    return AcceptedResponse(message=f"Restyling image {req.index + 1}")

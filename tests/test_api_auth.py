@@ -105,35 +105,44 @@ class TestLoadUsers:
 
 
 class TestAuthLogging:
+    """These tests exercise the auth-enabled code paths.  Auth is OFF by
+    default (OSS / localhost) so we explicitly enable it here."""
+
     def test_missing_auth_logs_warning(self, tmp_path, caplog):
         import logging
-        from src.api.auth import _get_current_user
+        from src.api.auth import _get_current_user, set_auth_enabled
         import src.api.auth as auth_mod
         auth_mod._users.clear()
-
-        with caplog.at_level(logging.WARNING, logger="src.api.auth"):
-            try:
-                _get_current_user(None)
-            except Exception:
-                pass
-        assert any("missing" in r.message.lower() for r in caplog.records)
+        set_auth_enabled(True)
+        try:
+            with caplog.at_level(logging.WARNING, logger="src.api.auth"):
+                try:
+                    _get_current_user(None)
+                except Exception:
+                    pass
+            assert any("missing" in r.message.lower() for r in caplog.records)
+        finally:
+            set_auth_enabled(False)
 
     def test_invalid_key_logs_warning_with_prefix(self, tmp_path, caplog):
         import logging
         from fastapi.security import HTTPAuthorizationCredentials
-        from src.api.auth import _get_current_user
+        from src.api.auth import _get_current_user, set_auth_enabled
         import src.api.auth as auth_mod
         auth_mod._users.clear()
-
-        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="badkey123")
-        with caplog.at_level(logging.WARNING, logger="src.api.auth"):
-            try:
-                _get_current_user(creds)
-            except Exception:
-                pass
-        assert any("badkey" in r.message for r in caplog.records)
-        # Full key must not appear in log
-        assert not any("badkey123" in r.message for r in caplog.records)
+        set_auth_enabled(True)
+        try:
+            creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="badkey123")
+            with caplog.at_level(logging.WARNING, logger="src.api.auth"):
+                try:
+                    _get_current_user(creds)
+                except Exception:
+                    pass
+            assert any("badkey" in r.message for r in caplog.records)
+            # Full key must not appear in log
+            assert not any("badkey123" in r.message for r in caplog.records)
+        finally:
+            set_auth_enabled(False)
 
 
 class TestUser:

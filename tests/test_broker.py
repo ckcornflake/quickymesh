@@ -107,12 +107,105 @@ class TestClaimNext:
         broker.enqueue("pipe1", "mesh_generate")
         broker.enqueue("pipe2", "screenshot")
         task1 = broker.claim_next(["mesh_generate", "screenshot"])
+        # Per-pipeline FIFO locks pipe1 until its work clears; finish it,
+        # then pipe2 becomes the active pipeline.
+        broker.mark_done(task1.id)
         task2 = broker.claim_next(["mesh_generate", "screenshot"])
         assert {task1.task_type, task2.task_type} == {"mesh_generate", "screenshot"}
 
     def test_returns_none_when_queue_empty(self, broker):
         task = broker.claim_next(["mesh_generate"])
         assert task is None
+
+    def test_workflow_scope_locks_active_pipeline(self, broker):
+        """
+        Per-pipeline FIFO: once pipeA has a task in-flight within the workflow
+        scope, tasks from pipeB must not be claimed — even if this worker has
+        no eligible task for pipeA right now.  This mirrors the real setup
+        where TrellisWorker and ScreenshotWorker share a workflow scope of
+        ['mesh_generate','mesh_texture','mesh_cleanup','screenshot'].
+        """
+        workflow = ["mesh_generate", "mesh_texture", "mesh_cleanup", "screenshot"]
+
+        broker.enqueue("pipeA", "mesh_generate")          # active pipeline
+        broker.enqueue("pipeB", "mesh_generate")
+
+        # TrellisWorker claims pipeA.mesh_generate.
+        t1 = broker.claim_next(["mesh_texture", "mesh_generate"], workflow)
+        assert t1.pipeline_name == "pipeA"
+        assert t1.task_type == "mesh_generate"
+
+        # pipeA's mesh_texture enqueues (chain).  ScreenshotWorker polls, but
+        # pipeA has no screenshot/cleanup work yet.  It must NOT claim pipeB's
+        # mesh_generate — it must idle.
+        broker.enqueue("pipeA", "mesh_texture")
+        t_ss = broker.claim_next(["mesh_cleanup", "screenshot"], workflow)
+        assert t_ss is None, "ScreenshotWorker must not jump to pipeB"
+
+        # Finish pipeA's work end-to-end.
+        broker.mark_done(t1.id)
+        t2 = broker.claim_next(["mesh_texture", "mesh_generate"], workflow)
+        assert t2.pipeline_name == "pipeA"
+        assert t2.task_type == "mesh_texture"
+        broker.mark_done(t2.id)
+
+        broker.enqueue("pipeA", "mesh_cleanup")
+        t3 = broker.claim_next(["mesh_cleanup", "screenshot"], workflow)
+        assert t3.pipeline_name == "pipeA"
+        broker.mark_done(t3.id)
+
+        broker.enqueue("pipeA", "screenshot")
+        t4 = broker.claim_next(["mesh_cleanup", "screenshot"], workflow)
+        assert t4.pipeline_name == "pipeA"
+        broker.mark_done(t4.id)
+
+        # Now pipeB becomes the active pipeline.
+        t5 = broker.claim_next(["mesh_texture", "mesh_generate"], workflow)
+        assert t5.pipeline_name == "pipeB"
+
+    def test_awaiting_approval_does_not_block_other_pipelines(self, broker):
+        """
+        When pipeA reaches AWAITING_APPROVAL, its screenshot task is 'done'
+        and no successor is enqueued (approval is a separate HTTP action).
+        With zero pending/running tasks in scope, pipeA must NOT hold the
+        active-pipeline slot — pipeB should immediately become active.
+        """
+        workflow = ["mesh_generate", "mesh_texture", "mesh_cleanup", "screenshot"]
+
+        # pipeA runs end-to-end and reaches awaiting_approval.
+        for ttype in workflow:
+            broker.enqueue("pipeA", ttype)
+        for _ in workflow:
+            t = broker.claim_next(workflow, workflow)
+            assert t.pipeline_name == "pipeA"
+            broker.mark_done(t.id)
+
+        # pipeB submitted while pipeA is awaiting user approval.
+        broker.enqueue("pipeB", "mesh_generate")
+        t = broker.claim_next(["mesh_texture", "mesh_generate"], workflow)
+        assert t is not None
+        assert t.pipeline_name == "pipeB", (
+            "pipeA in AWAITING_APPROVAL must not block pipeB from running"
+        )
+
+    def test_workflow_scope_isolates_unrelated_workflows(self, broker):
+        """
+        A 3D workflow holding pipeA must not block a concept-art task for
+        pipeB — the two workflows have disjoint scope lists.
+        """
+        w_3d = ["mesh_generate", "mesh_texture", "mesh_cleanup", "screenshot"]
+        w_ca = ["concept_art_generate", "concept_art_modify", "concept_art_restyle"]
+
+        broker.enqueue("pipeA", "mesh_generate")
+        broker.claim_next(["mesh_texture", "mesh_generate"], w_3d)
+
+        broker.enqueue("pipeB", "concept_art_generate")
+        ca = broker.claim_next(
+            ["concept_art_generate", "concept_art_modify", "concept_art_restyle"],
+            w_ca,
+        )
+        assert ca is not None
+        assert ca.pipeline_name == "pipeB"
 
     def test_thread_safety_no_double_claim(self, broker):
         """Two threads racing to claim — each task claimed at most once."""

@@ -130,24 +130,67 @@ class Broker:
             self._conn.commit()
             return cur.lastrowid
 
-    def claim_next(self, task_types: list[str]) -> Task | None:
+    def claim_next(
+        self,
+        task_types: list[str],
+        workflow_types: list[str] | None = None,
+    ) -> Task | None:
         """
-        Atomically claim the oldest pending task matching any of `task_types`.
-        Returns None if no matching task is available.
-        Sets status → 'running'.
+        Atomically claim the next eligible pending task.  Returns None if no
+        matching task is available.  Sets status → 'running'.
 
-        `task_types` is treated as a priority-ordered list: the first type that
-        has a pending task is claimed, regardless of insertion order.  This lets
-        workers finish one pipeline end-to-end before starting another (e.g.
-        mesh_texture is preferred over mesh_generate so each pipeline reaches
-        AWAITING_APPROVAL before the next mesh generation begins).
+        Per-pipeline FIFO (workflow scope)
+        ----------------------------------
+        `workflow_types` is the full set of task_types that belong to the same
+        pipeline workflow (e.g. all four 3D stages: mesh_generate, mesh_texture,
+        mesh_cleanup, screenshot).  All workers that cooperate on a workflow
+        should pass the same `workflow_types` list so they agree on scope.
+
+        The broker identifies the *active pipeline* within that scope: the
+        `pipeline_name` of the oldest pending/running task whose type is in
+        `workflow_types`.  Only tasks belonging to the active pipeline are
+        eligible for claiming.  If the active pipeline has no task of a type
+        this worker handles right now, the worker idles rather than picking
+        up a different pipeline — this guarantees that once a pipeline has
+        work in flight, it runs end-to-end before the next pipeline starts,
+        so a user who submitted first does not wait behind a large batch.
+
+        If `workflow_types` is omitted, it defaults to `task_types` (legacy
+        per-worker scope, used by tests that exercise a single worker).
+
+        Within the active pipeline, `task_types` is still treated as a
+        priority-ordered list so later stages preempt earlier ones (e.g.
+        mesh_texture before a hypothetical second mesh_generate).
         """
+        scope = workflow_types if workflow_types is not None else task_types
         with self._lock:
+            # Find the active pipeline: among pipelines that have any
+            # pending/running task in the workflow scope, pick the one whose
+            # FIRST task in scope (MIN(id) including completed tasks) is
+            # oldest.  This uses the original workflow entry time, not the
+            # current pending task's id — otherwise a chained successor
+            # task (which has a higher id) would make the pipeline look
+            # "younger" than rival pipelines whose work was submitted later.
+            placeholders = ",".join("?" * len(scope))
+            active_row = self._conn.execute(
+                f"SELECT pipeline_name FROM tasks "
+                f"WHERE task_type IN ({placeholders}) "
+                f"GROUP BY pipeline_name "
+                f"HAVING SUM(CASE WHEN status IN ('pending','running') "
+                f"                THEN 1 ELSE 0 END) > 0 "
+                f"ORDER BY MIN(id) ASC LIMIT 1",
+                scope,
+            ).fetchone()
+            if active_row is None:
+                return None
+            active_pipeline = active_row["pipeline_name"]
+
             for task_type in task_types:
                 row = self._conn.execute(
-                    "SELECT * FROM tasks WHERE status='pending' AND task_type=? "
+                    "SELECT * FROM tasks WHERE status='pending' "
+                    "AND task_type=? AND pipeline_name=? "
                     "ORDER BY id ASC LIMIT 1",
-                    (task_type,),
+                    (task_type, active_pipeline),
                 ).fetchone()
                 if row is not None:
                     now = _now()

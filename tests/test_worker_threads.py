@@ -290,6 +290,105 @@ class TestConceptArtWorkerThread:
         t.join(timeout=3)
 
         assert len(broker.get_tasks(status="done")) == 1
+        # After the modify task runs, the image version should have advanced
+        # (generate_concept_arts leaves version at 0; modify bumps to 1) and
+        # the status should be back to READY.
+        final = PipelineState.load(pipeline_state_path)
+        assert final.concept_arts[0].version == 1
+        assert final.concept_arts[0].status == ConceptArtStatus.READY
+
+    def test_processes_concept_art_restyle(self, broker, stop_event, cfg, pipeline_state_path):
+        """
+        ConceptArtWorkerThread should claim and execute a concept_art_restyle
+        task, invoking the restyle_worker and bumping the CA version.
+        """
+        from src.concept_art_pipeline import generate_concept_arts
+        state = PipelineState.load(pipeline_state_path)
+        pipeline_dir = pipeline_state_path.parent
+        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
+        state.save(pipeline_state_path)
+
+        # Mock restyle worker: returns a valid 1x1 PNG from restyle_image().
+        import io
+        buf = io.BytesIO()
+        Image.new("RGB", (1, 1), (255, 0, 0)).save(buf, format="PNG")
+        mock_restyle = MagicMock()
+        mock_restyle.restyle_image = MagicMock(return_value=buf.getvalue())
+
+        broker.enqueue(
+            "testpipe",
+            "concept_art_restyle",
+            {
+                "pipeline_name": "testpipe",
+                "state_path": str(pipeline_state_path),
+                "index": 0,
+                "positive": "zerg, biomechanical",
+                "negative": "blurry",
+                "denoise": 0.7,
+            },
+        )
+        t = ConceptArtWorkerThread(
+            broker, stop_event, MockConceptArtWorker(), cfg,
+            restyle_worker=mock_restyle, poll_interval=0.01,
+        )
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if broker.get_tasks(status="done"):
+                break
+            time.sleep(0.05)
+        stop_event.set()
+        t.join(timeout=3)
+
+        assert len(broker.get_tasks(status="done")) == 1
+        mock_restyle.restyle_image.assert_called_once()
+        # Positional args passed through correctly.
+        call = mock_restyle.restyle_image.call_args
+        assert call.args[1] == "zerg, biomechanical"
+        assert call.args[2] == "blurry"
+        assert call.args[3] == 0.7
+
+        final = PipelineState.load(pipeline_state_path)
+        assert final.concept_arts[0].version == 1
+        assert final.concept_arts[0].status == ConceptArtStatus.READY
+
+    def test_restyle_task_fails_cleanly_without_worker(self, broker, stop_event, cfg, pipeline_state_path):
+        """
+        If a concept_art_restyle task is enqueued but no restyle_worker is
+        configured, the task should be marked failed (not silently done).
+        """
+        from src.concept_art_pipeline import generate_concept_arts
+        state = PipelineState.load(pipeline_state_path)
+        pipeline_dir = pipeline_state_path.parent
+        generate_concept_arts(state, MockConceptArtWorker(), pipeline_dir, cfg)
+        state.save(pipeline_state_path)
+
+        broker.enqueue(
+            "testpipe",
+            "concept_art_restyle",
+            {
+                "pipeline_name": "testpipe",
+                "state_path": str(pipeline_state_path),
+                "index": 0,
+                "positive": "p",
+                "negative": "n",
+                "denoise": 0.5,
+            },
+        )
+        t = ConceptArtWorkerThread(
+            broker, stop_event, MockConceptArtWorker(), cfg,
+            restyle_worker=None, poll_interval=0.01,
+        )
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if broker.get_tasks(status="failed"):
+                break
+            time.sleep(0.05)
+        stop_event.set()
+        t.join(timeout=3)
+
+        assert len(broker.get_tasks(status="failed")) == 1
 
 
 # ---------------------------------------------------------------------------
