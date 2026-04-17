@@ -94,7 +94,7 @@ The server, Blender, and ComfyUI all run inside Docker — nothing else is neede
 
 The Docker container is the complete runtime — ComfyUI, the quickymesh API server, and Blender all run inside one image. Nothing else needs to be installed on the host beyond Python for the CLI client (`main.py`).
 
-> **Time warning:** The first build downloads PyTorch, ComfyUI, model dependencies, and Blender. Expect **30–60 minutes** on a typical connection. Subsequent builds use the Docker layer cache and finish in seconds unless the Dockerfile changes.
+> **Time warning:** The first build downloads PyTorch, ComfyUI, model dependencies, and Blender. Expect **15–30 minutes** on a typical connection. Subsequent builds use the Docker layer cache and finish in seconds unless the Dockerfile changes.
 
 ### Step 1 — Configure
 
@@ -183,10 +183,6 @@ Watch startup logs with:
 bash docker/build_run.sh logs
 ```
 
-> **First start:** if you skipped `download_models.sh trellis`, Trellis model
-> weights download on first container start — expect **10–30 minutes** before
-> the first mesh generation task will run.
-
 ### Just want a working Trellis2 + ComfyUI?
 
 Installing Trellis2 into a native ComfyUI setup is notoriously fiddly — custom
@@ -207,15 +203,6 @@ way to get there:
 The `comfyui_workflows/trellis_generate.json` and `trellis_texture.json`
 workflows in this repo are also usable as standalone ComfyUI workflows if you
 want a working starting point.
-
-### Advanced: native Windows install (not officially supported)
-
-Docker is the **supported install path** for quickymesh — everything below is at
-your own risk and is not covered by issue triage. That said, if you'd rather run
-ComfyUI + Trellis natively on Windows (no Docker), the community video below walks
-through the ComfyUI + Trellis2 side of the install:
-
-- **[Installing Trellis2 for ComfyUI on Windows](https://www.youtube.com/watch?v=OkK-BfLiS2Q)** — *Atelier Darren, Jan 2026*. Not affiliated with this project. Covers ComfyUI + Trellis2 only; you'll still need to install Blender separately, set `BLENDER_PATH` and `COMFYUI_OUTPUT_DIR` in your environment, and run `python api_server.py` yourself. FLUX.1-dev and ControlNet restyle weights are also your responsibility (see `docker/download_models.sh` for the URLs and target paths).
 
 ---
 
@@ -382,6 +369,16 @@ PipelineState (state.json)   — Pydantic model, saved to disk after every mutat
 - [examples/prompts.md](examples/prompts.md) — sample descriptions that produce good results
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR workflow
 - [CHANGELOG.md](CHANGELOG.md) — release notes
+
+- ### Advanced: native Windows install (not officially supported)
+
+Docker is the **supported install path** for quickymesh — everything below is at
+your own risk and is not covered by issue triage. That said, if you'd rather run
+ComfyUI + Trellis natively on Windows (no Docker), the community video below walks
+through the ComfyUI + Trellis2 side of the install:
+
+- **[Installing Trellis2 for ComfyUI on Windows](https://www.youtube.com/watch?v=OkK-BfLiS2Q)** — *Atelier Darren, Jan 2026*. Not affiliated with this project. Covers ComfyUI + Trellis2 only; you'll still need to install Blender separately, set `BLENDER_PATH` and `COMFYUI_OUTPUT_DIR` in your environment, and run `python api_server.py` yourself. FLUX.1-dev and ControlNet restyle weights are also your responsibility (see `docker/download_models.sh` for the URLs and target paths).
+
 
 ---
 
